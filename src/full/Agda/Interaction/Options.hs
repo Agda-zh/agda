@@ -335,7 +335,7 @@ checkOpts opts
     , "--safe or --vim."
     ]
 
-  htmlRelated = optGenerateHTML opts &&
+  htmlRelated = not (optGenerateHTML opts) &&
     (  optionChanged optHTMLDir
     || optionChanged optHTMLOnlyCode
     || optionChanged optHTMLOutputExt
