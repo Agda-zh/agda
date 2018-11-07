@@ -3,13 +3,37 @@
 module Agda.Interaction.Highlighting.Common
   ( toAtoms
   , chooseHighlightingMethod
+  , highlightOnlyCode
+  , highlightedFileExt
   ) where
 
+import Agda.Interaction.Options
 import Agda.Interaction.Highlighting.Precise
 import Agda.Syntax.Common
 import Agda.TypeChecking.Monad (HighlightingMethod(..))
 import Data.Maybe (maybeToList)
 import Data.Char (toLower)
+
+-- | Determine how to highlight the file
+highlightOnlyCode :: HtmlHighlight -> FileType -> Bool
+highlightOnlyCode HighlightAll  _ = False
+highlightOnlyCode HighlightCode _ = True
+highlightOnlyCode HighlightAuto AgdaFileType = False
+highlightOnlyCode HighlightAuto MdFileType   = True
+highlightOnlyCode HighlightAuto RstFileType  = True
+highlightOnlyCode HighlightAuto TexFileType  = False
+
+-- | Determine the generated file extension
+highlightedFileExt :: HtmlHighlight -> FileType -> String
+highlightedFileExt HighlightAll  _            = "html"
+highlightedFileExt HighlightCode AgdaFileType = "html"
+highlightedFileExt HighlightCode MdFileType   = "md"
+highlightedFileExt HighlightCode RstFileType  = "rst"
+highlightedFileExt HighlightCode TexFileType  = "tex"
+highlightedFileExt HighlightAuto AgdaFileType = "html"
+highlightedFileExt HighlightAuto MdFileType   = "md"
+highlightedFileExt HighlightAuto RstFileType  = "rst"
+highlightedFileExt HighlightAuto TexFileType  = "html"
 
 -- | Converts the 'aspect' and 'otherAspects' fields to strings that are
 -- friendly to editors.
