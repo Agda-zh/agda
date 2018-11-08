@@ -20,20 +20,19 @@ highlightOnlyCode HighlightAll  _ = False
 highlightOnlyCode HighlightCode _ = True
 highlightOnlyCode HighlightAuto AgdaFileType = False
 highlightOnlyCode HighlightAuto MdFileType   = True
-highlightOnlyCode HighlightAuto RstFileType  = True
+-- TODO: see #3373
+highlightOnlyCode HighlightAuto RstFileType  = False
 highlightOnlyCode HighlightAuto TexFileType  = False
 
 -- | Determine the generated file extension
 highlightedFileExt :: HtmlHighlight -> FileType -> String
-highlightedFileExt HighlightAll  _            = "html"
-highlightedFileExt HighlightCode AgdaFileType = "html"
-highlightedFileExt HighlightCode MdFileType   = "md"
-highlightedFileExt HighlightCode RstFileType  = "rst"
-highlightedFileExt HighlightCode TexFileType  = "tex"
-highlightedFileExt HighlightAuto AgdaFileType = "html"
-highlightedFileExt HighlightAuto MdFileType   = "md"
-highlightedFileExt HighlightAuto RstFileType  = "rst"
-highlightedFileExt HighlightAuto TexFileType  = "html"
+highlightedFileExt hh ft
+  | not $ highlightOnlyCode hh ft = "html"
+  | otherwise = case ft of
+      AgdaFileType -> "html"
+      MdFileType   -> "md"
+      RstFileType  -> "rst"
+      TexFileType  -> "tex"
 
 -- | Converts the 'aspect' and 'otherAspects' fields to strings that are
 -- friendly to editors.
