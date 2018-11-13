@@ -203,10 +203,13 @@ page css htmlHighlight modName pageContent =
 
     rest = body $ pre pageContent
 
-type TokenInfo = ( Int     -- ^ Position
-                 , String  -- ^ Contents
-                 , Aspects -- ^ Info
-                 )
+-- | Position, Contents, Infomation
+
+type TokenInfo =
+  ( Int
+  , String
+  , Aspects
+  )
 
 -- | Constructs token stream ready to print.
 
