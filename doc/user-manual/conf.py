@@ -19,7 +19,21 @@
 
 # -- Project information -----------------------------------------------------
 
-project = 'Agda'
+# The suffix(es) of source filenames.
+# You can specify multiple suffix as a list of string:
+#
+# source_suffix = ['.rst', '.md']
+source_suffix = ['.lagda.rst','.rst']
+
+# The encoding of source files.
+#
+source_encoding = 'utf-8-sig'
+
+# The master toctree document.
+master_doc = 'index'
+
+# General information about the project.
+project = 'Agda-zh'
 copyright = u'''2005-2018 remains with the authors.
 Agda 2 was originally written by Ulf Norell,
 partially based on code from Agda 1 by Catarina Coquand and Makoto Takeyama,
@@ -39,7 +53,7 @@ Francesco Mazzoli, Stefan Monnier, Darin Morrison, Guilhem Moulin,
 Nicolas Pouillard, Benjamin Price, Nobuo Yamashita, Christian Sattler,
 Makoto Takeyama and Tesla Ice Zhang.  The full list of contributors is
 available at https://github.com/agda/agda/graphs/contributors'''
-author = u'The Agda Team'
+author = u'Agda 团队'
 
 # The short X.Y version
 version = '2.6.0'
@@ -127,6 +141,40 @@ html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 
 
 # -- Options for HTMLHelp output ---------------------------------------------
+# If true, "Created using Sphinx" is shown in the HTML footer. Default is True.
+#
+# html_show_sphinx = True
+
+# If true, "(C) Copyright ..." is shown in the HTML footer. Default is True.
+#
+# html_show_copyright = True
+
+# If true, an OpenSearch description file will be output, and all pages will
+# contain a <link> tag referring to it.  The value of this option must be the
+# base URL from which the finished HTML is served.
+#
+# html_use_opensearch = ''
+
+# This is the file name suffix for HTML files (e.g. ".xhtml").
+# html_file_suffix = None
+
+# Language to be used for generating the HTML full-text search index.
+# Sphinx supports the following languages:
+#   'da', 'de', 'en', 'es', 'fi', 'fr', 'hu', 'it', 'ja'
+#   'nl', 'no', 'pt', 'ro', 'ru', 'sv', 'tr', 'zh'
+#
+# html_search_language = 'zh'
+
+# A dictionary with options for the search language support, empty by default.
+# 'ja' uses this config value.
+# 'zh' user can custom change `jieba` dictionary path.
+#
+# html_search_options = {'type': 'default'}
+
+# The name of a javascript file (relative to the configuration directory) that
+# implements a search results scorer. If empty, the default will be used.
+#
+# html_search_scorer = 'scorer.js'
 
 # Output file base name for HTML help builder.
 htmlhelp_basename = 'Agdadoc'
@@ -168,7 +216,7 @@ latex_additional_files = ["unicode-symbols-sphinx.tex.txt"]
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (master_doc, 'Agda.tex', u'Agda User Manual', u'The Agda Team', 'manual'),
+    (master_doc, 'Agda.tex', u'Agda 用户手册', u'Agda 团队', 'manual'),
 ]
 
 # -- Options for manual page output ------------------------------------------
@@ -176,7 +224,7 @@ latex_documents = [
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
 man_pages = [
-    (master_doc, 'agda', 'Agda Documentation',
+    (master_doc, 'agda', 'Agda 文档',
      [author], 1)
 ]
 
@@ -187,8 +235,8 @@ man_pages = [
 # (source start file, target name, title, author,
 #  dir menu entry, description, category)
 texinfo_documents = [
-    (master_doc, 'Agda', 'Agda Documentation',
-     author, 'Agda', 'One line description of project.',
+    (master_doc, 'Agda', 'Agda 文档',
+     author, 'Agda', '一个带有依赖类型的函数式编程语言',
      'Miscellaneous'),
 ]
 
