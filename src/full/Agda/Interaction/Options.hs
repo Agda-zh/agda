@@ -9,9 +9,9 @@ module Agda.Interaction.Options
     , HtmlHighlight(..)
     , WarningMode(..)
     , checkOpts
-    , parseStandardOptions, parseStandardOptions'
     , parsePragmaOptions
     , parsePluginOptions
+    , stripRTS
     , defaultOptions
     , defaultInteractionOptions
     , defaultVerbosity
@@ -28,7 +28,7 @@ module Agda.Interaction.Options
     , defaultLibDir
     -- Reused by PandocAgda
     , inputFlag
-    , standardOptions
+    , standardOptions, deadStandardOptions
     , getOptSimple
     ) where
 
@@ -118,6 +118,7 @@ data CommandLineOptions = Options
   , optHTMLDir          :: FilePath
   , optCSSFile          :: Maybe FilePath
   , optIgnoreInterfaces :: Bool
+  , optIgnoreAllInterfaces :: Bool
   , optForcing          :: Bool
   , optPragmaOptions    :: PragmaOptions
   , optOnlyScopeChecking :: Bool
@@ -223,6 +224,7 @@ defaultOptions = Options
   , optHTMLDir          = defaultHTMLDir
   , optCSSFile          = Nothing
   , optIgnoreInterfaces = False
+  , optIgnoreAllInterfaces = False
   , optForcing          = True
   , optPragmaOptions    = defaultPragmaOptions
   , optOnlyScopeChecking = False
@@ -484,6 +486,9 @@ noIrrelevantProjectionsFlag o = return $ o { optIrrelevantProjections = False }
 
 ignoreInterfacesFlag :: Flag CommandLineOptions
 ignoreInterfacesFlag o = return $ o { optIgnoreInterfaces = True }
+
+ignoreAllInterfacesFlag :: Flag CommandLineOptions
+ignoreAllInterfacesFlag o = return $ o { optIgnoreAllInterfaces = True }
 
 allowUnsolvedFlag :: Flag PragmaOptions
 allowUnsolvedFlag o = do
@@ -801,6 +806,8 @@ deadStandardOptions =
                     "DEPRECATED: does nothing"
     , Option []     ["no-sharing"] (NoArg $ sharingFlag False)
                     "DEPRECATED: does nothing"
+    , Option []     ["ignore-all-interfaces"] (NoArg ignoreAllInterfacesFlag) -- not deprecated! Just hidden
+                    "ignore all interface files (re-type check everything, including builtin files)"
     ] ++ map (fmap lensPragmaOptions) deadPragmaOptions
 
 pragmaOptions :: [OptDescr (Flag PragmaOptions)]
@@ -974,6 +981,7 @@ getOptSimple argv opts fileArg = \ defaults ->
       sugs [a] = a
       sugs as  = "any of " ++ intercalate " " as
 
+{- No longer used in favour of parseBackendOptions in Agda.Compiler.Backend
 -- | Parse the standard options.
 parseStandardOptions :: [String] -> OptM CommandLineOptions
 parseStandardOptions argv = parseStandardOptions' argv defaultOptions
@@ -982,6 +990,7 @@ parseStandardOptions' :: [String] -> Flag CommandLineOptions
 parseStandardOptions' argv opts = do
   opts <- getOptSimple (stripRTS argv) (deadStandardOptions ++ standardOptions) inputFlag opts
   checkOpts opts
+-}
 
 -- | Parse options from an options pragma.
 parsePragmaOptions
@@ -1014,7 +1023,8 @@ usage options progName GeneralHelp = usageInfo (header progName) options
 
 usage options progName (HelpFor topic) = helpTopicUsage topic
 
--- Remove +RTS .. -RTS from arguments
+-- | Removes RTS options from a list of options.
+
 stripRTS :: [String] -> [String]
 stripRTS [] = []
 stripRTS ("--RTS" : argv) = argv
