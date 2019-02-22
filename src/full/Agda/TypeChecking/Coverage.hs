@@ -311,9 +311,7 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
     [ nest 2 $ "ps   =" <+> pretty ps
     , nest 2 $ "target =" <+> (text . show) target
     ]
-  cs' <- normaliseProjP cs
-  ps' <- (traverse . traverse . traverse) dotPatternsToPatterns ps
-  case match cs' ps' of
+  match cs ps >>= \case
     Yes (i,mps) -> do
       exact <- allM mps isTrivialPattern
       let noExactClause = if exact || clauseCatchall (indexWithDefault __IMPOSSIBLE__ cs i)
@@ -591,7 +589,7 @@ createMissingHCompClause f n x old_sc (SClause tel ps _sigma' cps (Just t)) = se
       -- Γ,φ,u,u0 ⊢ Δf = i.Δ[x = hfill φ u u0 i]
       -- Γ,φ,u,u0,δ : Δ(x = hcomp φ u u0) ⊢ δ_fill     = i.tFillTel (i. Δf[~i]) δ (~ i) : i.Δf[i]
       -- Γ,φ,u,u0,δ : Δ(x = hcomp φ u u0) ⊢ old_t_fill = i.old_t[x = hfill φ u u0 i, δ_fill[i]]
-      -- Γ,φ,u,u0 ⊢ comp (\ i. old_t_fill[i])
+      -- Γ,φ,u,u0,δ : Δ(x = hcomp φ u u0) ⊢ comp (\ i. old_t_fill[i])
       --                 (\ i. [ φ ↦ g[x = hfill φ u u0 i,δ_fill[i]] = g[u i,δ_fill[i]]
       --                         α ↦ b[x = hfill φ u u0 i,δ_fill[i]]
       --                        ])
@@ -701,12 +699,12 @@ createMissingHCompClause f n x old_sc (SClause tel ps _sigma' cps (Just t)) = se
 
           -- Γ,φ,u,u0,Δ(x = hcomp φ u u0) ⊢ b : (i : I) → [α] -> old_t[x = hfill φ u u0 i,δ_fill[i]]
           b <- do
-             sides <- forM alphab $ \ (psi,(t,u)) -> do
+             sides <- forM alphab $ \ (psi,(side0,side1)) -> do
                 psi <- open $ hcompS `applySubst` psi
 
-                [t,u] <- mapM (open . raise (3+size delta) . abstract hdelta) [t,u]
-                return $ (ineg psi `imax` psi, \ i -> pOr_ty i (ineg psi) psi (ilam "o" $ \ _ -> apply_delta_fill i $ t <@> hfill lvl htype phi u u0 i)
-                                                            (ilam "o" $ \ _ -> apply_delta_fill i $ u <@> hfill lvl htype phi u u0 i))
+                [side0,side1] <- mapM (open . raise (3+size delta) . abstract hdelta) [side0,side1]
+                return $ (ineg psi `imax` psi, \ i -> pOr_ty i (ineg psi) psi (ilam "o" $ \ _ -> apply_delta_fill i $ side0 <@> hfill lvl htype phi u u0 i)
+                                                            (ilam "o" $ \ _ -> apply_delta_fill i $ side1 <@> hfill lvl htype phi u u0 i))
              let recurse []           i = __IMPOSSIBLE__
                  recurse [(psi,u)]    i = u i
                  recurse ((psi,u):xs) i = pOr_ty i psi (foldr imax (pure iz) (map fst xs)) (u i) (recurse xs i)

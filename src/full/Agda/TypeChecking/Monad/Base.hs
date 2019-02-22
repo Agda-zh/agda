@@ -105,6 +105,7 @@ import qualified Agda.Utils.Pretty as P
 import Agda.Utils.Singleton
 import Agda.Utils.Functor
 import Agda.Utils.Function
+import Agda.Utils.WithDefault ( collapseDefault )
 
 #include "undefined.h"
 import Agda.Utils.Impossible
@@ -2709,9 +2710,16 @@ data Warning
     -- ^ If the user opens a module public before the module header.
     --   (See issue #2377.)
   | UselessInline            QName
+  | WrongInstanceDeclaration
   | InstanceWithExplicitArg  QName
   -- ^ An instance was declared with an implicit argument, which means it
   --   will never actually be considered by instance search.
+  | InstanceNoOutputTypeName Doc
+  -- ^ The type of an instance argument doesn't end in a named or
+  -- variable type, so it will never be considered by instance search.
+  | InstanceArgWithExplicitArg Doc
+  -- ^ As InstanceWithExplicitArg, but for local bindings rather than
+  --   top-level instances.
   | InversionDepthReached    QName
   -- ^ The --inversion-max-depth was reached.
   -- Generic warnings for one-off things
@@ -2759,7 +2767,10 @@ warningName w = case w of
   DeprecationWarning{}         -> DeprecationWarning_
   EmptyRewritePragma           -> EmptyRewritePragma_
   IllformedAsClause            -> IllformedAsClause_
+  WrongInstanceDeclaration{}   -> WrongInstanceDeclaration_
   InstanceWithExplicitArg{}    -> InstanceWithExplicitArg_
+  InstanceNoOutputTypeName{}   -> InstanceNoOutputTypeName_
+  InstanceArgWithExplicitArg{} -> InstanceArgWithExplicitArg_
   GenericNonFatalError{}       -> GenericNonFatalError_
   GenericWarning{}             -> GenericWarning_
   InversionDepthReached{}      -> InversionDepthReached_
@@ -2957,8 +2968,6 @@ data TypeError
             -- ^ Wrong user-given relevance annotation in lambda.
         | WrongQuantityInLambda
             -- ^ Wrong user-given quantity annotation in lambda.
-        | WrongInstanceDeclaration
-            -- ^ A term is declared as an instance but it’s not allowed
         | HidingMismatch Hiding Hiding
             -- ^ The given hiding does not correspond to the expected hiding.
         | RelevanceMismatch Relevance Relevance
@@ -3193,6 +3202,18 @@ instance HasOptions m => HasOptions (StateT s m) where
 instance (HasOptions m, Monoid w) => HasOptions (WriterT w m) where
   pragmaOptions      = lift pragmaOptions
   commandLineOptions = lift commandLineOptions
+
+-- Ternary options are annoying to deal with so we provide auxiliary
+-- definitions using @collapseDefault@.
+
+sizedTypesOption :: HasOptions m => m Bool
+sizedTypesOption = collapseDefault . optSizedTypes <$> pragmaOptions
+
+guardednessOption :: HasOptions m => m Bool
+guardednessOption = collapseDefault . optGuardedness <$> pragmaOptions
+
+withoutKOption :: HasOptions m => m Bool
+withoutKOption = collapseDefault . optWithoutK <$> pragmaOptions
 
 -----------------------------------------------------------------------------
 -- * The reduce monad

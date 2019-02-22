@@ -75,6 +75,9 @@ instance EmbPrj Warning where
   icod_ (InstanceWithExplicitArg a)  = icodeN 17 InstanceWithExplicitArg a
   icod_ (InfectiveImport a b)          = icodeN 18 InfectiveImport a b
   icod_ (CoInfectiveImport a b)        = icodeN 19 CoInfectiveImport a b
+  icod_ (InstanceNoOutputTypeName a) = icodeN 20 InstanceNoOutputTypeName a
+  icod_ (InstanceArgWithExplicitArg a) = icodeN 21 InstanceArgWithExplicitArg a
+  icod_ WrongInstanceDeclaration     = icodeN 22 WrongInstanceDeclaration
 
   value = vcase valu where
       valu [0, a, b]    = valuN UnreachableClauses a b
@@ -96,7 +99,9 @@ instance EmbPrj Warning where
       valu [16]         = valuN WithoutKFlagPrimEraseEquality
       valu [17, a]      = valuN InstanceWithExplicitArg a
       valu [18, a, b]   = valuN InfectiveImport a b
-      valu [19, a, b]   = valuN InfectiveImport a b
+      valu [19, a, b]   = valuN CoInfectiveImport a b
+      valu [20, a]      = valuN InstanceNoOutputTypeName a
+      valu [21, a]      = valuN InstanceArgWithExplicitArg a
       valu _ = malformed
 
 instance EmbPrj DeclarationWarning where

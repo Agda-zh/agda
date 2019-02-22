@@ -56,6 +56,7 @@ data-files:         Agda.css
                     JS/biginteger.js
                     lib/prim/Agda/Builtin/Bool.agda
                     lib/prim/Agda/Builtin/Char.agda
+                    lib/prim/Agda/Builtin/Char/Properties.agda
                     lib/prim/Agda/Builtin/Coinduction.agda
                     lib/prim/Agda/Builtin/Cubical/Path.agda
                     lib/prim/Agda/Builtin/Cubical/Id.agda
@@ -77,6 +78,7 @@ data-files:         Agda.css
                     lib/prim/Agda/Builtin/Size.agda
                     lib/prim/Agda/Builtin/Strict.agda
                     lib/prim/Agda/Builtin/String.agda
+                    lib/prim/Agda/Builtin/String/Properties.agda
                     lib/prim/Agda/Builtin/TrustMe.agda
                     lib/prim/Agda/Builtin/Unit.agda
                     lib/prim/Agda/Builtin/Word.agda
@@ -117,7 +119,6 @@ custom-setup
   setup-depends:  base >= 4.8.0.0 && < 4.13
                 , Cabal >= 1.22.5.0 && < 2.5
                 , filepath >= 1.4.0.0 && < 1.5
-                , filemanip >= 0.3.6.2 && < 0.4
                 , process >= 1.2.3.0 && < 1.7
                 , directory >= 1.2.2.0 && < 1.4
 
@@ -143,6 +144,10 @@ library
 
   if os(windows)
     build-depends:  Win32 >= 2.3.1.0 && < 2.7
+
+  -- Agda cannot be built with GHC 8.6.1 due to a compiler bug
+  if impl(ghc ==8.6.1.*)
+    buildable: False
 
   build-depends:  aeson >= 0.11.3.0 && < 1.5
                 , array >= 0.5.1.0 && < 0.6
@@ -540,9 +545,11 @@ library
                     Agda.Utils.Trie
                     Agda.Utils.Tuple
                     Agda.Utils.TypeLevel
+                    Agda.Utils.TypeLits
                     Agda.Utils.Update
                     Agda.Utils.VarSet
                     Agda.Utils.Warshall
+                    Agda.Utils.WithDefault
                     Agda.Utils.Zipper
                     Agda.Version
                     Agda.VersionCommit
@@ -769,6 +776,10 @@ test-suite agda-tests
   if impl(ghc < 8.0)
     -- provide/emulate `Data.Semigroups` API for pre-GHC8
     build-depends:  semigroups == 0.18.*
+
+  -- Agda cannot be built with GHC 8.6.1 due to a compiler bug
+  if impl(ghc ==8.6.1.*)
+    buildable: False
 
   default-language:  Haskell2010
 
