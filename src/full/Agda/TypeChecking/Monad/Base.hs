@@ -702,6 +702,11 @@ freshNoName r =
 freshNoName_ :: MonadTCState m => m Name
 freshNoName_ = freshNoName noRange
 
+freshRecordName :: MonadTCState m => m Name
+freshRecordName = do
+  i <- fresh
+  return $ Name i (C.RecordName noRange "r") noRange noFixity'
+
 -- | Create a fresh name from @a@.
 class FreshName a where
   freshName_ :: MonadTCState m => a -> m Name
@@ -2703,9 +2708,10 @@ data Warning
     -- ^ In `OldBuiltin old new`, the BUILTIN old has been replaced by new
   | EmptyRewritePragma
     -- ^ If the user wrote just @{-\# REWRITE \#-}@.
-  | IllformedAsClause
+  | IllformedAsClause String
     -- ^ If the user wrote something other than an unqualified name
     --   in the @as@ clause of an @import@ statement.
+    --   The 'String' gives optionally extra explanation.
   | UselessPublic
     -- ^ If the user opens a module public before the module header.
     --   (See issue #2377.)
@@ -2766,7 +2772,7 @@ warningName w = case w of
   CoverageNoExactSplit{}       -> CoverageNoExactSplit_
   DeprecationWarning{}         -> DeprecationWarning_
   EmptyRewritePragma           -> EmptyRewritePragma_
-  IllformedAsClause            -> IllformedAsClause_
+  IllformedAsClause{}          -> IllformedAsClause_
   WrongInstanceDeclaration{}   -> WrongInstanceDeclaration_
   InstanceWithExplicitArg{}    -> InstanceWithExplicitArg_
   InstanceNoOutputTypeName{}   -> InstanceNoOutputTypeName_
