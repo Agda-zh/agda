@@ -44,11 +44,13 @@ import Agda.TypeChecking.Abstract
 import Agda.TypeChecking.CompiledClause
 import Agda.TypeChecking.Constraints
 import Agda.TypeChecking.Conversion
+import Agda.TypeChecking.Coverage.SplitTree
 import Agda.TypeChecking.Datatypes
 import Agda.TypeChecking.EtaContract
 import Agda.TypeChecking.Generalize
 import Agda.TypeChecking.Implicit
 import Agda.TypeChecking.Irrelevance
+import Agda.TypeChecking.IApplyConfluence
 import Agda.TypeChecking.Level
 import Agda.TypeChecking.MetaVars
 import Agda.TypeChecking.Names
@@ -584,6 +586,7 @@ checkAbsurdLambda cmp i h e t = do
                     }
                   ]
               , funCompiled       = Just Fail
+              , funSplitTree      = Just $ SplittingDone 0
               , funMutual         = Just []
               , funTerminates     = Just True
               }
@@ -625,6 +628,9 @@ checkExtendedLambda cmp i di qname cs e t = do
          useTerPragma $
            (defaultDefn info qname t emptyFunction) { defMutual = j }
        checkFunDef' t info NotDelayed (Just $ ExtLamInfo lamMod Nothing) Nothing di qname cs
+       whenNothingM (asksTC envMutualBlock) $
+         -- Andrea 10-03-2018: Should other checks be performed here too? e.g. termination/positivity/..
+         checkIApplyConfluence_ qname
        return $ Def qname $ map Apply args)
   where
     -- Concrete definitions cannot use information about abstract things.
@@ -702,7 +708,7 @@ catchIlltypedPatternBlockedOnMeta m handle = do
 
     -- The meta might not be known in the reset state, as it could have been created
     -- somewhere on the way to the type error.
-    Map.lookup x <$> getMetaStore >>= \case
+    lookupMeta' x >>= \case
       -- Case: we do not know the meta, so we reraise.
       Nothing -> reraise
       -- Case: we know the meta here.
@@ -949,10 +955,7 @@ checkExpr' cmp e t0 =
 
     e <- scopedExpr e
 
-    isPrp <- isPropM t
-    let irrelevantIfProp = applyWhen isPrp $ applyRelevanceToContext Irrelevant
-
-    irrelevantIfProp $ tryInsertHiddenLambda e t $ case e of
+    tryInsertHiddenLambda e t $ case e of
 
         A.ScopedExpr scope e -> __IMPOSSIBLE__ -- setScope scope >> checkExpr e t
 
@@ -1238,7 +1241,7 @@ unquoteTactic tac hole goal k = do
   case ok of
     Left (BlockedOnMeta oldState x) -> do
       putTC oldState
-      mi <- Map.lookup x <$> getMetaStore
+      mi <- lookupMeta' x
       (r, unblock) <- case mi of
         Nothing -> do -- fresh meta: need to block on something else!
           otherMetas <- allMetas <$> instantiateFull goal

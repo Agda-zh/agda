@@ -15,6 +15,7 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Identity
 
+import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.List as List
@@ -604,8 +605,12 @@ typeOfMetaMI norm mi =
                    TCM (OutputConstraint Expr NamedMeta)
     rewriteJudg mv (HasType i t) = do
       ms <- getMetaNameSuggestion i
-      t <- normalForm norm t
+      -- Andreas, 2019-03-17, issue #3638:
+      -- Need to put meta type into correct context _before_ normalizing,
+      -- otherwise rewrite rules in parametrized modules will not fire.
       vs <- getContextArgs
+      t <- t `piApplyM` permute (takeP (size vs) $ mvPermutation mv) vs
+      t <- normalForm norm t
       let x = NamedMeta ms i
       reportSDoc "interactive.meta" 10 $ TP.vcat
         [ TP.text $ unwords ["permuting", show i, "with", show $ mvPermutation mv]
@@ -618,7 +623,7 @@ typeOfMetaMI norm mi =
         ]
       reportSDoc "interactive.meta.scope" 20 $ TP.text $ show $ getMetaScope mv
       -- Andreas, 2016-01-19, issue #1783: need piApplyM instead of just piApply
-      OfType x <$> do reify =<< t `piApplyM` permute (takeP (size vs) $ mvPermutation mv) vs
+      OfType x <$> reify t
     rewriteJudg mv (IsSort i t) = do
       ms <- getMetaNameSuggestion i
       return $ JustSort $ NamedMeta ms i
@@ -637,8 +642,8 @@ typesOfVisibleMetas norm =
 typesOfHiddenMetas :: Rewrite -> TCM [OutputConstraint Expr NamedMeta]
 typesOfHiddenMetas norm = liftTCM $ do
   is    <- getInteractionMetas
-  store <- Map.filterWithKey (openAndImplicit is) <$> getMetaStore
-  mapM (typeOfMetaMI norm) $ Map.keys store
+  store <- IntMap.filterWithKey (openAndImplicit is . MetaId) <$> getMetaStore
+  mapM (typeOfMetaMI norm . MetaId) $ IntMap.keys store
   where
   openAndImplicit is x m =
     case mvInstantiation m of

@@ -64,6 +64,7 @@ import Agda.Syntax.Scope.Base
 import qualified Agda.Syntax.Info as Info
 
 import Agda.TypeChecking.CompiledClause
+import Agda.TypeChecking.Coverage.SplitTree
 import Agda.TypeChecking.Positivity.Occurrence
 import Agda.TypeChecking.Free.Lazy (Free(freeVars'), bind', bind)
 
@@ -346,7 +347,7 @@ initPostScopeState :: PostScopeState
 initPostScopeState = PostScopeState
   { stPostSyntaxInfo           = mempty
   , stPostDisambiguatedNames   = IntMap.empty
-  , stPostMetaStore            = Map.empty
+  , stPostMetaStore            = IntMap.empty
   , stPostInteractionPoints    = Map.empty
   , stPostAwakeConstraints     = []
   , stPostSleepingConstraints  = []
@@ -697,7 +698,7 @@ freshName r s = do
 freshNoName :: MonadTCState m => Range -> m Name
 freshNoName r =
     do  i <- fresh
-        return $ Name i (C.NoName noRange i) r noFixity'
+        return $ Name i (C.NoName noRange i) r noFixity' False
 
 freshNoName_ :: MonadTCState m => m Name
 freshNoName_ = freshNoName noRange
@@ -705,7 +706,7 @@ freshNoName_ = freshNoName noRange
 freshRecordName :: MonadTCState m => m Name
 freshRecordName = do
   i <- fresh
-  return $ Name i (C.RecordName noRange "r") noRange noFixity'
+  return $ Name i (C.Name noRange C.NotInScope [C.Id "r"]) noRange noFixity' True
 
 -- | Create a fresh name from @a@.
 class FreshName a where
@@ -1107,7 +1108,7 @@ data CheckedTarget = CheckedTarget (Maybe ProblemId)
 
 data TypeCheckingProblem
   = CheckExpr Comparison A.Expr Type
-  | CheckArgs ExpandHidden Range [NamedArg A.Expr] Type Type (Elims -> Type -> CheckedTarget -> TCM Term)
+  | CheckArgs ExpandHidden Range [NamedArg A.Expr] Type Type ([Maybe Range] -> Elims -> Type -> CheckedTarget -> TCM Term)
   | CheckProjAppToKnownPrincipalArg Comparison A.Expr ProjOrigin (NonemptyList QName) A.Args Type Int Term Type
   | CheckLambda Comparison (Arg ([WithHiding Name], Maybe Type)) A.Expr Type
     -- ^ @(λ (xs : t₀) → e) : t@
@@ -1166,7 +1167,7 @@ instance Pretty NamedMeta where
   pretty (NamedMeta "_" x) = pretty x
   pretty (NamedMeta s  x) = text $ "_" ++ s ++ prettyShow x
 
-type MetaStore = Map MetaId MetaVariable
+type MetaStore = IntMap MetaVariable
 
 instance HasRange MetaInfo where
   getRange = clValue . miClosRange
@@ -1683,8 +1684,15 @@ data Defn = Axiom -- ^ Postulate
               -- ^ 'Nothing' while function is still type-checked.
               --   @Just cc@ after type and coverage checking and
               --   translation to case trees.
+            , funSplitTree      :: Maybe SplitTree
+              -- ^ The split tree constructed by the coverage
+              --   checker. Needed to re-compile the clauses after
+              --   forcing translation.
             , funTreeless       :: Maybe Compiled
               -- ^ Intermediate representation for compiler backends.
+            , funCovering :: [Closure Clause]
+              -- ^ Covering clauses computed by coverage checking.
+              --   Erased by (IApply) confluence checking(?)
             , funInv            :: FunctionInverse
             , funMutual         :: Maybe [QName]
               -- ^ Mutually recursive functions, @data@s and @record@s.
@@ -1813,6 +1821,7 @@ instance Pretty Defn where
     "Function {" <?> vcat
       [ "funClauses      =" <?> vcat (map pretty funClauses)
       , "funCompiled     =" <?> pshow funCompiled
+      , "funSplitTree    =" <?> pshow funSplitTree
       , "funTreeless     =" <?> pshow funTreeless
       , "funInv          =" <?> pshow funInv
       , "funMutual       =" <?> pshow funMutual
@@ -1875,6 +1884,7 @@ emptyFunction :: Defn
 emptyFunction = Function
   { funClauses     = []
   , funCompiled    = Nothing
+  , funSplitTree   = Nothing
   , funTreeless    = Nothing
   , funInv         = NotInjective
   , funMutual      = Nothing
@@ -1886,6 +1896,7 @@ emptyFunction = Function
   , funExtLam      = Nothing
   , funWith        = Nothing
   , funCopatternLHS = False
+  , funCovering    = []
   }
 
 funFlag :: FunctionFlag -> Lens' Bool Defn
@@ -3846,8 +3857,8 @@ instance KillRange Defn where
       DataOrRecSig n -> DataOrRecSig n
       GeneralizableVar -> GeneralizableVar
       AbstractDefn{} -> __IMPOSSIBLE__ -- only returned by 'getConstInfo'!
-      Function cls comp tt inv mut isAbs delayed proj flags term extlam with copat ->
-        killRange13 Function cls comp tt inv mut isAbs delayed proj flags term extlam with copat
+      Function cls comp ct tt covering inv mut isAbs delayed proj flags term extlam with copat ->
+        killRange15 Function cls comp ct tt covering inv mut isAbs delayed proj flags term extlam with copat
       Datatype a b c d e f g h i     -> killRange8 Datatype a b c d e f g h i
       Record a b c d e f g h i j k   -> killRange11 Record a b c d e f g h i j k
       Constructor a b c d e f g h i  -> killRange9 Constructor a b c d e f g h i
@@ -3896,3 +3907,6 @@ instance KillRange DisplayTerm where
       DDef q dts        -> killRange2 DDef q dts
       DDot v            -> killRange1 DDot v
       DTerm v           -> killRange1 DTerm v
+
+instance KillRange a => KillRange (Closure a) where
+  killRange = id

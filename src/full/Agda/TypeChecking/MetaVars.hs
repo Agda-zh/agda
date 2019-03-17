@@ -124,7 +124,7 @@ assignTerm' x tel v = do
     wakeupConstraints x
     reportSLn "tc.meta.assign" 20 $ "completed assignment of " ++ prettyShow x
   where
-    ins x i = Map.adjust (\ mv -> mv { mvInstantiation = i }) x
+    ins x i = IntMap.adjust (\ mv -> mv { mvInstantiation = i }) $ metaId x
 
 -- * Creating meta variables.
 
@@ -468,7 +468,21 @@ etaExpandMeta kinds m = whenM (asksTC envAssignMetas `and2M` isEtaExpandable kin
     case mvJudgement meta of
       IsSort{} -> dontExpand
       HasType _ a -> do
+
+        reportSDoc "tc.meta.eta" 40 $ sep
+          [ text "considering eta-expansion at type "
+          , prettyTCM a
+          , text " raw: "
+          , pretty a
+          ]
+
         TelV tel b <- telView a
+        reportSDoc "tc.meta.eta" 40 $ sep
+          [ text "considering eta-expansion at type"
+          , addContext tel (prettyTCM b)
+          , text "under telescope"
+          , prettyTCM tel
+          ]
 
         -- Eta expanding metas with a domFinite will just make sure
         -- they go unsolved: conversion will compare them at the
@@ -1277,7 +1291,7 @@ openMetasToPostulates = do
   m <- asksTC envCurrentModule
 
   -- Go through all open metas.
-  ms <- Map.assocs <$> useTC stMetaStore
+  ms <- IntMap.assocs <$> useTC stMetaStore
   forM_ ms $ \ (x, mv) -> do
     when (isOpenMeta $ mvInstantiation mv) $ do
       let t = jMetaType $ mvJudgement mv
@@ -1285,14 +1299,14 @@ openMetasToPostulates = do
       -- Create a name for the new postulate.
       let r = clValue $ miClosRange $ mvInfo mv
       -- s <- render <$> prettyTCM x -- Using _ is a bad idea, as it prints as prefix op
-      let s = "unsolved#meta." ++ show (metaId x)
+      let s = "unsolved#meta." ++ show x
       n <- freshName r s
       let q = A.QName m n
 
       -- Debug.
       reportSDoc "meta.postulate" 20 $ vcat
         [ text ("Turning " ++ if isSortMeta_ mv then "sort" else "value" ++ " meta ")
-            <+> prettyTCM x <+> " into postulate."
+            <+> prettyTCM (MetaId x) <+> " into postulate."
         , nest 2 $ vcat
           [ "Name: " <+> prettyTCM q
           , "Type: " <+> prettyTCM t
@@ -1304,5 +1318,5 @@ openMetasToPostulates = do
 
       -- Solve the meta.
       let inst = InstV [] $ Def q []
-      stMetaStore `modifyTCLens` Map.adjust (\ mv0 -> mv0 { mvInstantiation = inst }) x
+      updateMetaVar (MetaId x) $ \ mv0 -> mv0 { mvInstantiation = inst }
       return ()

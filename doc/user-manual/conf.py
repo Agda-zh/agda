@@ -19,22 +19,8 @@
 
 # -- Project information -----------------------------------------------------
 
-# The suffix(es) of source filenames.
-# You can specify multiple suffix as a list of string:
-#
-# source_suffix = ['.rst', '.md']
-source_suffix = ['.lagda.rst','.rst']
-
-# The encoding of source files.
-#
-source_encoding = 'utf-8-sig'
-
-# The master toctree document.
-master_doc = 'index'
-
-# General information about the project.
 project = 'Agda-zh'
-copyright = u'''2005-2018 remains with the authors.
+copyright = u'''2005–2019 remains with the authors.
 Agda 2 was originally written by Ulf Norell,
 partially based on code from Agda 1 by Catarina Coquand and Makoto Takeyama,
 and from Agdalight by Ulf Norell and Andreas Abel.
@@ -163,7 +149,7 @@ html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 #   'da', 'de', 'en', 'es', 'fi', 'fr', 'hu', 'it', 'ja'
 #   'nl', 'no', 'pt', 'ro', 'ru', 'sv', 'tr', 'zh'
 #
-# html_search_language = 'zh'
+html_search_language = 'zh'
 
 # A dictionary with options for the search language support, empty by default.
 # 'ja' uses this config value.
@@ -216,7 +202,7 @@ latex_additional_files = ["unicode-symbols-sphinx.tex.txt"]
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (master_doc, 'Agda.tex', u'Agda 用户手册', u'Agda 团队', 'manual'),
+    (master_doc, 'Agda.tex', u'Agda User Manual', u'The Agda Team', 'manual'),
 ]
 
 # -- Options for manual page output ------------------------------------------
