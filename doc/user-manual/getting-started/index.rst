@@ -1,8 +1,12 @@
 .. _getting-started:
 
-***************
-Getting Started
-***************
+****
+起步
+****
+
+.. ***************
+.. Getting Started
+.. ***************
 
 .. toctree::
    :maxdepth: 2
