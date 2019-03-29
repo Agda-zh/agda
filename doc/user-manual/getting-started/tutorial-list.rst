@@ -1,11 +1,18 @@
 .. _tutorial-list:
 
-*******************
-A List of Tutorials
-*******************
+********
+教程列表
+********
 
-Introduction to Agda
-====================
+.. *******************
+.. A List of Tutorials
+.. *******************
+
+.. Introduction to Agda
+.. ====================
+
+Agda 介绍
+=========
 
 - Ulf Norell and James Chapman.
    - `Dependently Typed Programming in Agda <http://www.cse.chalmers.se/~ulfn/papers/afp08/tutorial.pdf>`__.
@@ -56,8 +63,11 @@ Introduction to Agda
 - Diviánszky Péter.
    - `Agda Tutorial <https://people.inf.elte.hu/divip/AgdaTutorial/Index.html>`__
 
-Courses using Agda
-==================
+.. Courses using Agda
+.. ==================
+
+使用 Agda 的课程
+================
 
 - `Computer Aided Reasoning <http://www.cs.nott.ac.uk/~txa/g53cfr/>`__
   Material for a 3rd / 4th year course (g53cfr, g54 cfr) at the university of Nottingham 2010 by Thorsten Altenkirch
@@ -95,8 +105,11 @@ Courses using Agda
 - `Inductive and inductive-recursive definitions in Intuitionistic Type Theory <https://www.cs.uoregon.edu/research/summerschool/summer15/curriculum.html>`__
   , lectures by Peter Dybjer at the Oregon Programming Languages Summer School 2015.
 
-Miscellaneous
-=============
+.. Miscellaneous
+.. =============
 
-- Agda has a `Wikipedia page
+其它
+====
+
+- Agda 的 `维基百科页面
   <https://en.wikipedia.org/wiki/Agda__(programming__language)>`__

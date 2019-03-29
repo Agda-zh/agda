@@ -3,8 +3,11 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to Agda's documentation!
-================================
+.. Welcome to Agda's documentation!
+.. ================================
+
+欢迎阅读 Agda 文档！
+====================
 
 .. toctree::
    :maxdepth: 2
@@ -16,8 +19,8 @@ Welcome to Agda's documentation!
    contribute/index
    team
 
-Indices and tables
-==================
+索引和列表
+==========
 
 * :ref:`genindex`
 * :ref:`search`
