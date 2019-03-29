@@ -29,6 +29,7 @@ import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map -- hiding (singleton, null, empty)
 import Data.Monoid ( Monoid, mempty, mappend )
+import Data.Sequence (Seq)
 import Data.Set (Set)
 import qualified Data.Set as Set -- hiding (singleton, null, empty)
 import Data.Semigroup ( Semigroup, (<>), Any(..) )
@@ -921,6 +922,7 @@ data Constraint
     --   of candidates (or Nothing if we haven’t determined the list of
     --   candidates yet)
   | CheckFunDef Delayed Info.DefInfo QName [A.Clause]
+  | UnquoteTactic (Maybe MetaId) Term Term Type   -- ^ First argument is computation and the others are hole and goal type
   deriving (Data, Show)
 
 instance HasRange Constraint where
@@ -956,6 +958,7 @@ instance Free Constraint where
       CheckFunDef _ _ _ _   -> mempty
       HasBiggerSort s       -> freeVars' s
       HasPTSRule s1 s2      -> freeVars' (s1 , s2)
+      UnquoteTactic _ t h g -> freeVars' (t, (h, g))
 
 instance TermLike Constraint where
   foldTerm f = \case
@@ -966,6 +969,7 @@ instance TermLike Constraint where
       LevelCmp _ l l'        -> foldTerm f (l, l')
       IsEmpty _ t            -> foldTerm f t
       CheckSizeLtSat u       -> foldTerm f u
+      UnquoteTactic _ t h g  -> foldTerm f (t, h, g)
       TelCmp _ _ _ tel1 tel2 -> __IMPOSSIBLE__  -- foldTerm f (tel1, tel2) -- Not yet implemented
       SortCmp _ s1 s2        -> __IMPOSSIBLE__  -- foldTerm f (s1, s2) -- Not yet implemented
       UnBlock _              -> __IMPOSSIBLE__  -- mempty     -- Not yet implemented
@@ -1118,7 +1122,6 @@ data TypeCheckingProblem
     --     @(λ (x y : Fin _) → e) : (x : Fin n) → ?@
     --   we want to postpone @(λ (y : Fin n) → e) : ?@ where @Fin n@
     --   is a 'Type' rather than an 'A.Expr'.
-  | UnquoteTactic Term Term Type   -- ^ First argument is computation and the others are hole and goal type
   | DoQuoteTerm Comparison Term Type -- ^ Quote the given term and check type against `Term`
 
 instance Show MetaInstantiation where
@@ -1552,12 +1555,9 @@ instance HasRange CompilerPragma where
 
 type BackendName    = String
 
--- Temporary: while we still parse the old pragmas we need to know the names of
--- the corresponding backends.
-jsBackendName, ghcBackendName, uhcBackendName :: BackendName
+jsBackendName, ghcBackendName :: BackendName
 jsBackendName  = "JS"
 ghcBackendName = "GHC"
-uhcBackendName = "UHC"
 
 type CompiledRepresentation = Map BackendName [CompilerPragma]
 
@@ -2708,7 +2708,7 @@ data Warning
   | CoverageIssue            QName [(Telescope, [NamedArg DeBruijnPattern])]
   -- ^ `CoverageIssue f pss` means that `pss` are not covered in `f`
   | CoverageNoExactSplit     QName [Clause]
-  | NotStrictlyPositive      QName OccursWhere
+  | NotStrictlyPositive      QName (Seq OccursWhere)
   | UnsolvedMetaVariables    [Range]  -- ^ Do not use directly with 'warning'
   | UnsolvedInteractionMetas [Range]  -- ^ Do not use directly with 'warning'
   | UnsolvedConstraints      Constraints
