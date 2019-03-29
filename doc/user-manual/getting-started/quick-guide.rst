@@ -8,13 +8,13 @@
 .. Quick Guide to Editing, Type Checking and Compiling Agda Code
 .. *************************************************************
 
-.. _quick-guide-introduction:
-
-.. Introduction
-.. ============
+_quick-guide-introduction:
 
 简介
 ====
+
+.. Introduction
+.. ============
 
 .. Agda programs are commonly edited using `Emacs
 .. <http://www.gnu.org/software/emacs/>`_ or `Atom
