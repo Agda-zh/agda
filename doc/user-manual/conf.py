@@ -190,6 +190,12 @@ latex_elements = {
 \usepackage{pifont}
 \usepackage{keystroke}
 \input{unicode-symbols-sphinx.tex.txt}
+
+% Customised setup for CJK Characters
+\hypersetup{unicode=true}
+\usepackage{CJKutf8}
+\AtBeginDocument{\begin{CJK}{UTF8}{gbsn}}
+\AtEndDocument{\end{CJK}}
     ''',
     # Latex figure (float) alignment
     #
