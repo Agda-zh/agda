@@ -18,6 +18,8 @@ module Agda.TypeChecking.Coverage
 
 import Prelude hiding (null, (!!))  -- do not use partial functions like !!
 
+import Control.Arrow (second)
+
 import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.Trans ( lift )
@@ -53,7 +55,7 @@ import Agda.TypeChecking.Coverage.SplitTree
 
 import Agda.TypeChecking.Conversion (tryConversion, equalType, equalTermOnFace)
 import Agda.TypeChecking.Datatypes (getConForm)
-import {-# SOURCE #-} Agda.TypeChecking.Empty ( isEmptyTel, isEmptyType )
+import {-# SOURCE #-} Agda.TypeChecking.Empty ( checkEmptyTel, isEmptyTel, isEmptyType )
 import Agda.TypeChecking.Free
 import Agda.TypeChecking.Irrelevance
 import Agda.TypeChecking.Patterns.Internal (dotPatternsToPatterns)
@@ -223,13 +225,21 @@ coverageCheck f t cs = do
 
   -- filter out the missing clauses that are absurd.
   pss <- flip filterM pss $ \(tel,ps) ->
-    ifNotM (isEmptyTel tel) (return True) $ do
+    -- Andreas, 2019-04-13, issue #3692: when adding missing absurd
+    -- clauses, also put the absurd pattern in.
+    caseEitherM (checkEmptyTel noRange tel) (\ _ -> return True) $ \ l -> do
+      -- Now, @l@ is the first type in @tel@ (counting from 0=leftmost)
+      -- which is empty.  Turn it into a de Bruijn index @i@.
+      let i = size tel - 1 - l
+      -- Build a substitution mapping this pattern variable to the absurd pattern.
+      let sub = inplaceS i $ absurdP i
+        -- ifNotM (isEmptyTel tel) (return True) $ do
       -- Jesper, 2018-11-28, Issue #3407: if the clause is absurd,
       -- add the appropriate absurd clause to the definition.
       let cl = Clause { clauseLHSRange    = noRange
                       , clauseFullRange   = noRange
                       , clauseTel         = tel
-                      , namedClausePats   = ps
+                      , namedClausePats   = applySubst sub ps
                       , clauseBody        = Nothing
                       , clauseType        = Nothing
                       , clauseCatchall    = False
@@ -239,6 +249,11 @@ coverageCheck f t cs = do
         sep [ "adding missing absurd clause"
             , nest 2 $ prettyTCM $ QNamed f cl
             ]
+      reportSDoc "tc.cover.missing" 80 $ inTopContext $ vcat
+        [ "l   = " <+> pretty l
+        , "i   = " <+> pretty i
+        , "cl  = " <+> pretty (QNamed f cl)
+        ]
       addClauses f [cl]
       return False
 
@@ -313,7 +328,7 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
     ]
   match cs ps >>= \case
     Yes (i,mps) -> do
-      exact <- allM mps isTrivialPattern
+      exact <- allM (map snd mps) isTrivialPattern
       let cl0 = indexWithDefault __IMPOSSIBLE__ cs i
       let noExactClause = if exact || clauseCatchall (indexWithDefault __IMPOSSIBLE__ cs i)
                           then Set.empty
@@ -356,16 +371,21 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
         continue xs YesAllowPartialCover $ \ err -> do
           typeError $ SplitError err
   where
-    applyCl :: SplitClause -> Clause -> [SplitPattern] -> TCM (Closure Clause)
+    applyCl :: SplitClause -> Clause -> [(Nat, SplitPattern)] -> TCM (Closure Clause)
     applyCl SClause{scTel = tel, scCheckpoints = cps} cl mps
       = addContext tel
         $ locallyTC eCheckpoints (const cps)
         $ checkpoint IdS $ do
-        -- invariant: tel = clauseTel cl `applyE` patternsToElims mps'
+        reportSDoc "tc.cover.applyCl" 40 $ "applyCl"
+        reportSDoc "tc.cover.applyCl" 40 $ "tel    =" <+> prettyTCM tel
+        reportSDoc "tc.cover.applyCl" 40 $ "ps     =" <+> pretty (namedClausePats cl)
+        reportSDoc "tc.cover.applyCl" 40 $ "mps    =" <+> pretty mps
+        reportSDoc "tc.cover.applyCl" 40 $ "s      =" <+> pretty s
+        reportSDoc "tc.cover.applyCl" 40 $ "new ps =" <+> pretty (s `applySubst` namedClausePats cl)
         buildClosure $
              Clause { clauseLHSRange  = clauseLHSRange cl
                     , clauseFullRange = clauseFullRange cl
-                    , clauseTel       = tel -- clauseTel cl `applyE` patternsToElims mps'
+                    , clauseTel       = tel
                     , namedClausePats = s `applySubst` namedClausePats cl
                     , clauseBody      = (s `applyPatSubst`) <$> clauseBody cl
                     , clauseType      = (s `applyPatSubst`) <$> clauseType cl
@@ -373,8 +393,10 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
                     , clauseUnreachable = clauseUnreachable cl
                     }
       where
-        mps' = fromSplitPatterns $ map defaultNamedArg mps
-        s = parallelS (reverse $ map namedArg mps')
+        (vs,qs) = unzip mps
+        mps' = zip vs $ map namedArg $ fromSplitPatterns $ map defaultNamedArg qs
+        s = parallelS (for [0..maximum (-1:vs)] $ (\ i -> fromMaybe (deBruijnVar i) (List.lookup i mps')))
+
     updateRelevance :: TCM a -> TCM a
     updateRelevance cont =
       -- Don't do anything if there is no target type info.
@@ -1260,7 +1282,7 @@ split' checkEmpty ind allowPartialCover fixtarget
         -- cons = constructors of this datatype
         (dr, d, pars, ixs, cons', isHIT) <- inContextOfT $ isDatatype ind t
         cons <- case checkEmpty of
-          CheckEmpty   -> ifM (liftTCM $ isEmptyType $ unDom t) (pure []) (pure cons')
+          CheckEmpty   -> ifM (liftTCM $ inContextOfT $ isEmptyType $ unDom t) (pure []) (pure cons')
           NoCheckEmpty -> pure cons'
         mns  <- forM cons $ \ con -> fmap (SplitCon con,) <$>
           computeNeighbourhood delta1 n delta2 d pars ixs x tel ps cps con
