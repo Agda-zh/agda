@@ -11,6 +11,7 @@ import qualified Data.List as List
 import Data.List ((\\))
 import Data.Maybe
 import Data.Map (Map)
+import Data.Monoid
 import Data.Traversable
 import Data.Hashable
 
@@ -80,7 +81,7 @@ isFullyInstantiatedMeta :: MetaId -> TCM Bool
 isFullyInstantiatedMeta m = do
   mv <- TCM.lookupMeta m
   case mvInstantiation mv of
-    InstV _tel v -> null . allMetas <$> instantiateFull v
+    InstV _tel v -> noMetas <$> instantiateFull v
     _ -> return False
 
 -- | Instantiate something.
@@ -1410,12 +1411,13 @@ instance InstantiateFull Clause where
 
 instance InstantiateFull Interface where
     instantiateFull' (Interface h s ft ms mod scope inside
-                               sig display userwarn b foreignCode
+                               sig display userwarn importwarn b foreignCode
                                highlighting pragmas usedOpts patsyns warnings) =
         Interface h s ft ms mod scope inside
             <$> instantiateFull' sig
             <*> instantiateFull' display
             <*> return userwarn
+            <*> return importwarn
             <*> instantiateFull' b
             <*> return foreignCode
             <*> return highlighting

@@ -28,6 +28,7 @@ import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Maybe
+import Data.Monoid
 import Data.Traversable (traverse)
 import Data.Monoid (mempty)
 import Data.Word
@@ -59,15 +60,16 @@ import Agda.TypeChecking.Pretty ()  -- instances only
 import Agda.TypeChecking.Names
 import Agda.TypeChecking.Warnings
 
+import Agda.Utils.Float
 import Agda.Utils.Functor
 import Agda.Utils.List
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Pretty (pretty, prettyShow)
+import Agda.Utils.Singleton
 import Agda.Utils.Size
 import Agda.Utils.String ( Str(Str), unStr )
 import Agda.Utils.Tuple
-import Agda.Utils.Float
 
 #include "undefined.h"
 import Agda.Utils.Impossible
@@ -1583,6 +1585,13 @@ primStringToListInjective = do
   toList <- primFunName <$> getPrimitive "primStringToList"
   mkPrimInjective string chars toList
 
+primWord64ToNatInjective :: TCM PrimitiveImpl
+primWord64ToNatInjective =  do
+  word  <- primType (undefined :: Word64)
+  nat   <- primType (undefined :: Nat)
+  toNat <- primFunName <$> getPrimitive "primWord64ToNat"
+  mkPrimInjective word nat toNat
+
 getRefl :: TCM (Arg Term -> Term)
 getRefl = do
   -- BUILTIN REFL maybe a constructor with one (the principal) argument or only parameters.
@@ -1750,11 +1759,11 @@ mkPrimFun1TCM mt f = do
     return $ PrimImpl t $ primFun __IMPOSSIBLE__ 1 $ \ts ->
       case ts of
         [v] ->
-          redBind (toA v) (\v' -> [v']) $ \x -> do
+          redBind (toA v) singleton $ \ x -> do
             b <- f x
-            case allMetas b of
-              (m:_) -> return $ NoReduction [reduced (Blocked m v)]
-              []       -> redReturn =<< fromB b
+            case firstMeta b of
+              Just m  -> return $ NoReduction [reduced (Blocked m v)]
+              Nothing -> redReturn =<< fromB b
         _ -> __IMPOSSIBLE__
 
 -- Tying the knot
@@ -1767,8 +1776,7 @@ mkPrimFun1 f = do
     return $ PrimImpl t $ primFun __IMPOSSIBLE__ 1 $ \ts ->
       case ts of
         [v] ->
-          redBind (toA v)
-              (\v' -> [v']) $ \x ->
+          redBind (toA v) singleton $ \ x ->
           redReturn $ fromB $ f x
         _ -> __IMPOSSIBLE__
 
@@ -2004,6 +2012,7 @@ primitiveFunctions = Map.fromList
   -- Machine words
   , "primWord64ToNat"     |-> mkPrimFun1 (fromIntegral :: Word64 -> Nat)
   , "primWord64FromNat"   |-> mkPrimFun1 (fromIntegral :: Nat -> Word64)
+  , "primWord64ToNatInjective" |-> primWord64ToNatInjective
 
   -- Level functions
   , "primLevelZero"       |-> mkPrimLevelZero
