@@ -208,7 +208,7 @@ latex_additional_files = ["unicode-symbols-sphinx.tex.txt"]
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (master_doc, 'Agda.tex', u'Agda User Manual', u'The Agda Team', 'manual'),
+    (master_doc, 'Agda.tex', u'Agda 用户手册', u'Agda 团队', 'manual'),
 ]
 
 # -- Options for manual page output ------------------------------------------

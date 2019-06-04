@@ -1,11 +1,6 @@
-{-# LANGUAGE CPP                      #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 
 module Agda.TypeChecking.Records where
-
-#if MIN_VERSION_base(4,11,0)
-import Prelude hiding ((<>))
-#endif
 
 import Control.Monad
 import Control.Monad.Reader
@@ -26,6 +21,7 @@ import Agda.Syntax.Position
 
 import Agda.TypeChecking.Irrelevance
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Reduce.Monad ()
@@ -35,6 +31,7 @@ import Agda.TypeChecking.Telescope
 import {-# SOURCE #-} Agda.TypeChecking.ProjectionLike (eligibleForProjectionLike)
 
 import Agda.Utils.Either
+import Agda.Utils.Except
 import Agda.Utils.Functor (for, ($>))
 import Agda.Utils.Lens
 import Agda.Utils.List
@@ -45,7 +42,6 @@ import qualified Agda.Utils.HashMap as HMap
 import Agda.Utils.Pretty (prettyShow)
 import Agda.Utils.Size
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 mkCon :: ConHead -> ConInfo -> Args -> Term
@@ -115,7 +111,7 @@ recordModule = mnameFromList . qnameToList
 
 -- | Get the definition for a record. Throws an exception if the name
 --   does not refer to a record or the record is abstract.
-getRecordDef :: (MonadTCM m, HasConstInfo m) => QName -> m Defn
+getRecordDef :: (HasConstInfo m, ReadTCState m, MonadError TCErr m) => QName -> m Defn
 getRecordDef r = maybe err return =<< isRecord r
   where err = typeError $ ShouldBeRecordType (El __DUMMY_SORT__ $ Def r [])
 
@@ -126,8 +122,13 @@ getRecordOfField d = caseMaybeM (isProjection d) (return Nothing) $
     return $ unArg r <$ proper -- if proper then Just (unArg r) else Nothing
 
 -- | Get the field names of a record.
-getRecordFieldNames :: QName -> TCM [Arg C.Name]
+getRecordFieldNames :: (HasConstInfo m, ReadTCState m, MonadError TCErr m)
+                    => QName -> m [Arg C.Name]
 getRecordFieldNames r = recordFieldNames <$> getRecordDef r
+
+getRecordFieldNames_ :: (HasConstInfo m, ReadTCState m)
+                     => QName -> m (Maybe [Arg C.Name])
+getRecordFieldNames_ r = fmap recordFieldNames <$> isRecord r
 
 recordFieldNames :: Defn -> [Arg C.Name]
 recordFieldNames = map (fmap (nameConcrete . qnameName)) . recFields
@@ -169,7 +170,7 @@ getRecordTypeFields t = do
 
 -- | Returns the given record type's constructor name (with an empty
 -- range).
-getRecordConstructor :: QName -> TCM ConHead
+getRecordConstructor :: (HasConstInfo m, ReadTCState m, MonadError TCErr m) => QName -> m ConHead
 getRecordConstructor r = killRange <$> recConHead <$> getRecordDef r
 
 -- | Check if a name refers to a record.
@@ -186,7 +187,7 @@ isRecord r = do
 -- | Reduce a type and check whether it is a record type.
 --   Succeeds only if type is not blocked by a meta var.
 --   If yes, return its name, parameters, and definition.
-isRecordType :: (MonadReduce m, HasConstInfo m)
+isRecordType :: (MonadReduce m, HasConstInfo m, HasBuiltins m)
              => Type -> m (Maybe (QName, Args, Defn))
 isRecordType t = either (const Nothing) Just <$> tryRecordType t
 
@@ -194,9 +195,9 @@ isRecordType t = either (const Nothing) Just <$> tryRecordType t
 --   Succeeds only if type is not blocked by a meta var.
 --   If yes, return its name, parameters, and definition.
 --   If no, return the reduced type (unless it is blocked).
-tryRecordType :: (MonadReduce m, HasConstInfo m)
+tryRecordType :: (MonadReduce m, HasConstInfo m, HasBuiltins m)
               => Type -> m (Either (Blocked Type) (QName, Args, Defn))
-tryRecordType t = ifBlockedType t (\ m a -> return $ Left $ Blocked m a) $ \ nb t -> do
+tryRecordType t = ifBlocked t (\ m a -> return $ Left $ Blocked m a) $ \ nb t -> do
   let no = return $ Left $ NotBlocked nb t
   case unEl t of
     Def r es -> do
@@ -240,7 +241,7 @@ getDefType f t = do
   -- if @f@ is not a projection (like) function, @a@ is the correct type
       fallback = return $ Just a
   reportSDoc "tc.deftype" 20 $ vcat
-    [ "definition f = " <> prettyTCM f <+> text ("  -- raw: " ++ prettyShow f)
+    [ ("definition f = " <> prettyTCM f) <+> text ("  -- raw: " ++ prettyShow f)
     , "has type   a = " <> prettyTCM a
     , "principal  t = " <> prettyTCM t
     ]
@@ -291,11 +292,12 @@ getDefType f t = do
 --   Precondition: @t@ is reduced.
 --
 projectTyped
-  :: Term        -- ^ Head (record value).
+  :: (HasConstInfo m, MonadReduce m, MonadDebug m)
+  =>  Term        -- ^ Head (record value).
   -> Type        -- ^ Its type.
   -> ProjOrigin
   -> QName       -- ^ Projection.
-  -> TCM (Maybe (Dom Type, Term, Type))
+  -> m (Maybe (Dom Type, Term, Type))
 projectTyped v t o f = caseMaybeM (getDefType f t) (return Nothing) $ \ tf -> do
   ifNotPiType tf (const $ return Nothing) {- else -} $ \ dom b -> do
   u <- applyDef o f (argFromDom dom $> v)
@@ -372,7 +374,8 @@ isRecordConstructor c = getConstInfo' c >>= \case
 -- | Check if a constructor name is the internally generated record constructor.
 --
 --   Works also for abstract constructors.
-isGeneratedRecordConstructor :: QName -> TCM Bool
+isGeneratedRecordConstructor :: (MonadTCEnv m, HasConstInfo m)
+                             => QName -> m Bool
 isGeneratedRecordConstructor c = ignoreAbstractMode $ do
   caseMaybeM (isRecordConstructor c) (return False) $ \ (_, def) ->
     case def of
@@ -557,16 +560,16 @@ curryAt t n = do
 
     where @tel@ is the record telescope instantiated at the parameters @pars@.
 -}
-etaExpandRecord :: (MonadTCM m, HasConstInfo m, MonadDebug m)
+etaExpandRecord :: (HasConstInfo m, MonadDebug m, ReadTCState m, MonadError TCErr m)
                 => QName -> Args -> Term -> m (Telescope, Args)
 etaExpandRecord = etaExpandRecord' False
 
 -- | Eta expand a record regardless of whether it's an eta-record or not.
-forceEtaExpandRecord :: (MonadTCM m, HasConstInfo m, MonadDebug m)
+forceEtaExpandRecord :: (HasConstInfo m, MonadDebug m, ReadTCState m, MonadError TCErr m)
                      => QName -> Args -> Term -> m (Telescope, Args)
 forceEtaExpandRecord = etaExpandRecord' True
 
-etaExpandRecord' :: (MonadTCM m, HasConstInfo m, MonadDebug m)
+etaExpandRecord' :: (HasConstInfo m, MonadDebug m, ReadTCState m, MonadError TCErr m)
                  => Bool -> QName -> Args -> Term -> m (Telescope, Args)
 etaExpandRecord' forceEta r pars u = do
   def <- getRecordDef r
@@ -668,22 +671,27 @@ etaContractRecord r c ci args = do
 --
 -- Precondition: The name should refer to a record type, and the
 -- arguments should be the parameters to the type.
-isSingletonRecord :: QName -> Args -> TCM (Either MetaId Bool)
+isSingletonRecord :: (MonadReduce m, MonadAddContext m, HasConstInfo m, HasBuiltins m, ReadTCState m)
+                  => QName -> Args -> m (Either MetaId Bool)
 isSingletonRecord r ps = mapRight isJust <$> isSingletonRecord' False r ps
 
-isSingletonRecordModuloRelevance :: QName -> Args -> TCM (Either MetaId Bool)
+isSingletonRecordModuloRelevance :: (MonadReduce m, MonadAddContext m, HasConstInfo m, HasBuiltins m, ReadTCState m)
+                                 => QName -> Args -> m (Either MetaId Bool)
 isSingletonRecordModuloRelevance r ps = mapRight isJust <$> isSingletonRecord' True r ps
 
 -- | Return the unique (closed) inhabitant if exists.
 --   In case of counting irrelevance in, the returned inhabitant
 --   contains dummy terms.
-isSingletonRecord' :: Bool -> QName -> Args -> TCM (Either MetaId (Maybe Term))
+isSingletonRecord' :: forall m. (MonadReduce m, MonadAddContext m, HasConstInfo m, HasBuiltins m, ReadTCState m)
+                   => Bool -> QName -> Args -> m (Either MetaId (Maybe Term))
 isSingletonRecord' regardIrrelevance r ps = do
   reportSLn "tc.meta.eta" 30 $ "Is " ++ prettyShow r ++ " a singleton record type?"
-  def <- getRecordDef r
-  emap (mkCon (recConHead def) ConOSystem) <$> check (recTel def `apply` ps)
+  isRecord r >>= \case
+    Nothing  -> return $ Right Nothing
+    Just def -> do
+      emap (mkCon (recConHead def) ConOSystem) <$> check (recTel def `apply` ps)
   where
-  check :: Telescope -> TCM (Either MetaId (Maybe [Arg Term]))
+  check :: Telescope -> m (Either MetaId (Maybe [Arg Term]))
   check tel = do
     reportSDoc "tc.meta.eta" 30 $
       "isSingletonRecord' checking telescope " <+> prettyTCM tel
@@ -703,19 +711,21 @@ isSingletonRecord' regardIrrelevance r ps = do
 
 -- | Check whether a type has a unique inhabitant and return it.
 --   Can be blocked by a metavar.
-isSingletonType :: Type -> TCM (Either MetaId (Maybe Term))
+isSingletonType :: (MonadReduce m, MonadAddContext m, HasConstInfo m, HasBuiltins m, ReadTCState m)
+                => Type -> m (Either MetaId (Maybe Term))
 isSingletonType = isSingletonType' False
 
 -- | Check whether a type has a unique inhabitant (irrelevant parts ignored).
 --   Can be blocked by a metavar.
-isSingletonTypeModuloRelevance :: (MonadTCM tcm) => Type -> tcm (Either MetaId Bool)
-isSingletonTypeModuloRelevance t = liftTCM $ do
-  mapRight isJust <$> isSingletonType' True t
+isSingletonTypeModuloRelevance :: (MonadReduce m, MonadAddContext m, HasConstInfo m, HasBuiltins m, ReadTCState m)
+                               => Type -> m (Either MetaId Bool)
+isSingletonTypeModuloRelevance t = mapRight isJust <$> isSingletonType' True t
 
-isSingletonType' :: Bool -> Type -> TCM (Either MetaId (Maybe Term))
+isSingletonType' :: (MonadReduce m, MonadAddContext m, HasConstInfo m, HasBuiltins m, ReadTCState m)
+                 => Bool -> Type -> m (Either MetaId (Maybe Term))
 isSingletonType' regardIrrelevance t = do
     TelV tel t <- telView t
-    ifBlockedType t (\ m _ -> return $ Left m) $ \ _ t -> do
+    ifBlocked t (\ m _ -> return $ Left m) $ \ _ t -> do
       res <- isRecordType t
       case res of
         Just (r, ps, def) | YesEta <- recEtaEquality def -> do

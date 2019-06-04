@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP              #-}
 
 -- | Generates data used for precise syntax highlighting.
 
@@ -38,11 +37,11 @@ import qualified Data.Set as Set
 import qualified Data.Text.Lazy as T
 import Data.Void
 
-import Agda.Interaction.Response (Response(Resp_HighlightingInfo))
+import Agda.Interaction.Response
+       (Response(Resp_HighlightingInfo),
+        RemoveTokenBasedHighlighting(KeepHighlighting))
 import Agda.Interaction.Highlighting.Precise
 import Agda.Interaction.Highlighting.Range
-import Agda.Interaction.Response
-  (RemoveTokenBasedHighlighting(KeepHighlighting))
 
 import qualified Agda.TypeChecking.Errors as E
 import Agda.TypeChecking.MetaVars (isBlockedTerm)
@@ -81,7 +80,6 @@ import Agda.Utils.Pretty
 import Agda.Utils.HashMap (HashMap)
 import qualified Agda.Utils.HashMap as HMap
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 -- | @highlightAsTypeChecked rPre r m@ runs @m@ and returns its
@@ -650,6 +648,8 @@ warningHighlighting w = case tcWarning w of
   LibraryWarning{}           -> mempty
   InfectiveImport{}          -> mempty
   CoInfectiveImport{}        -> mempty
+  RewriteNonConfluent{}      -> confluenceErrorHighlighting $ P.getRange w
+  RewriteMaybeNonConfluent{} -> confluenceErrorHighlighting $ P.getRange w
   NicifierIssue w           -> case w of
     -- we intentionally override the binding of `w` here so that our pattern of
     -- using `P.getRange w` still yields the most precise range information we
@@ -715,6 +715,9 @@ catchallHighlighting :: P.Range -> File
 catchallHighlighting r = singleton (rToR $ P.continuousPerLine r) m
   where m = parserBased { otherAspects = Set.singleton CatchallClause }
 
+confluenceErrorHighlighting :: P.Range -> File
+confluenceErrorHighlighting r = singleton (rToR $ P.continuousPerLine r) m
+  where m = parserBased { otherAspects = Set.singleton ConfluenceProblem }
 
 -- | Generates and prints syntax highlighting information for unsolved
 -- meta-variables and certain unsolved constraints.

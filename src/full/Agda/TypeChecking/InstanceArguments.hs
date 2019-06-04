@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 
 module Agda.TypeChecking.InstanceArguments
@@ -7,10 +6,6 @@ module Agda.TypeChecking.InstanceArguments
   , isConsideringInstance
   , postponeInstanceConstraints
   ) where
-
-#if MIN_VERSION_base(4,11,0)
-import Prelude hiding ((<>))
-#endif
 
 import Control.Applicative hiding (empty)
 import Control.Monad.Reader
@@ -56,7 +51,6 @@ import Agda.Utils.Functor
 import Agda.Utils.Pretty (prettyShow)
 import Agda.Utils.Null (empty)
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 -- | Compute a list of instance candidates.
@@ -120,7 +114,7 @@ initialInstanceCandidates t = do
                  ]
       return $ vars ++ fields ++ lets
 
-    etaExpand :: (MonadTCM m, MonadReduce m, HasConstInfo m)
+    etaExpand :: (MonadTCM m, MonadReduce m, HasConstInfo m, HasBuiltins m)
               => Bool -> Type -> m (Maybe (QName, Args))
     etaExpand etaOnce t =
       isEtaRecordType t >>= \case
@@ -141,9 +135,9 @@ initialInstanceCandidates t = do
 
     instanceFields' :: Bool -> (Term,Type) -> ExceptT Blocked_ TCM [Candidate]
     instanceFields' etaOnce (v, t) =
-      ifBlockedType t (\m _ -> throwError $ Blocked m ()) $ \ _ t -> do
+      ifBlocked t (\m _ -> throwError $ Blocked m ()) $ \ _ t -> do
       caseMaybeM (etaExpand etaOnce t) (return []) $ \ (r, pars) -> do
-        (tel, args) <- forceEtaExpandRecord r pars v
+        (tel, args) <- lift $ forceEtaExpandRecord r pars v
         let types = map unDom $ applySubst (parallelS $ reverse $ map unArg args) (flattenTel tel)
         fmap concat $ forM (zip args types) $ \ (arg, t) ->
           ([ Candidate (unArg arg) t (isOverlappable arg)
@@ -300,7 +294,7 @@ insidePi t ret =
     Level{}    -> __IMPOSSIBLE__
     MetaV{}    -> __IMPOSSIBLE__
     DontCare{} -> __IMPOSSIBLE__
-    Dummy s    -> __IMPOSSIBLE_VERBOSE__ s
+    Dummy s _  -> __IMPOSSIBLE_VERBOSE__ s
 
 -- | Apply the computation to every argument in turn by reseting the state every
 --   time. Return the list of the arguments giving the result True.
@@ -473,11 +467,11 @@ checkCandidates m t cands =
                   case sol of
                     MetaV m' _ | m == m' ->
                       reportSDoc "tc.instance" 15 $
-                        sep [ "instance search: maybe solution for" <+> prettyTCM m <> ":"
+                        sep [ ("instance search: maybe solution for" <+> prettyTCM m) <> ":"
                             , nest 2 $ prettyTCM v ]
                     _ ->
                       reportSDoc "tc.instance" 15 $
-                        sep [ "instance search: found solution for" <+> prettyTCM m <> ":"
+                        sep [ ("instance search: found solution for" <+> prettyTCM m) <> ":"
                             , nest 2 $ prettyTCM sol ]
 
             do solveAwakeConstraints' True
@@ -526,7 +520,7 @@ isConsideringInstance =
   and2M ((^. stConsideringInstance) <$> getTCState)
         (not . optOverlappingInstances <$> pragmaOptions)
 
-nowConsideringInstance :: (MonadTCState m) => m a -> m a
+nowConsideringInstance :: (ReadTCState m) => m a -> m a
 nowConsideringInstance = locallyTCState stConsideringInstance $ const True
 
 wakeupInstanceConstraints :: TCM ()

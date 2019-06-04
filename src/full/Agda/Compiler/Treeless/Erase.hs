@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE PatternSynonyms #-}
 
 module Agda.Compiler.Treeless.Erase (eraseTerms, computeErasedConstructorArgs) where
@@ -23,9 +22,10 @@ import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Telescope
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Datatypes
-import Agda.TypeChecking.Pretty hiding ((<>))
+import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Primitive
 
+import {-# SOURCE #-} Agda.Compiler.Backend
 import Agda.Compiler.Treeless.Subst
 import Agda.Compiler.Treeless.Pretty
 import Agda.Compiler.Treeless.Unused
@@ -40,7 +40,6 @@ import qualified Agda.Utils.Pretty as P
 import Agda.Utils.IntSet.Infinite (IntSet)
 import qualified Agda.Utils.IntSet.Infinite as IntSet
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 data ESt = ESt { _funMap  :: Map QName FunInfo
@@ -278,8 +277,9 @@ getTypeInfo t0 = do
   lift $ reportSDoc "treeless.opt.erase.type" 50 $ prettyTCM t0 <+> text ("is " ++ show e)
   return e
   where
-    typeInfo :: QName -> E TypeInfo
-    typeInfo q = memoRec (typeMap . key q) Erasable $ do  -- assume recursive occurrences are erasable
+  typeInfo :: QName -> E TypeInfo
+  typeInfo q = ifM (erasureForbidden q) (return NotErasable) $ {-else-} do
+    memoRec (typeMap . key q) Erasable $ do  -- assume recursive occurrences are erasable
       msizes <- lift $ mapM getBuiltinName
                          [builtinSize, builtinSizeLt]
       def    <- lift $ getConstInfo q
@@ -302,3 +302,6 @@ getTypeInfo t0 = do
             I.Function{ funClauses = cs } ->
               sumTypeInfo <$> mapM (maybe (return Empty) (getTypeInfo . El __DUMMY_SORT__) . clauseBody) cs
             _ -> return NotErasable
+  -- | The backend also has a say whether a type is eraseable or not.
+  erasureForbidden :: QName -> E Bool
+  erasureForbidden q = lift $ not <$> activeBackendMayEraseType q

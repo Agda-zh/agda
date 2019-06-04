@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP                #-}
-{-# LANGUAGE DeriveDataTypeable #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -62,7 +60,6 @@ import qualified Agda.Utils.Empty as Empty
 
 import Agda.Utils.WithDefault
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 instance {-# OVERLAPPING #-} EmbPrj String where
@@ -437,11 +434,6 @@ instance EmbPrj a => EmbPrj (Arg a) where
   icod_ (Arg i e) = icodeN' Arg i e
 
   value = valueN Arg
-
-instance EmbPrj a => EmbPrj (Dom a) where
-  icod_ (Dom a b c d) = icodeN' Dom a b c d
-
-  value = valueN Dom
 
 instance EmbPrj HasEta where
   icod_ YesEta = icodeN' YesEta

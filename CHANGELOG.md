@@ -1,12 +1,118 @@
 Release notes for Agda version 2.6.1
 ====================================
 
+Installation and infrastructure
+-------------------------------
+
+* Removed support for GHC 7.10.3.
 
 Pragmas and options
 -------------------
 
 * New pragma `WARNING_ON_IMPORT` to let module authors raise a warning
   when a module is imported. This can be use to tell users deprecations.
+
+* New option `--confluence-check` (off by default) enables confluence
+  checking of user-defined rewrite rules (this only has an effect when
+  `--rewriting` is also enabled).
+
+GHC Backend
+-----------
+
+* Types which have a COMPILE GHC pragma are no longer erased
+  [[Issue #3732](https://github.com/agda/agda/issues/3732)].
+
+  ```agda
+  data I : Set where
+    bar : I
+
+  {-# FOREIGN GHC data I = Bar     #-}
+  {-# COMPILE GHC I = data I (Bar) #-}
+
+  data S : Set where
+    foo :  I → S
+
+  {-# FOREIGN GHC data S = Foo I #-}
+  {-# COMPILE GHC S = data S (Foo) #-}
+  ```
+  Previously [[Issue #2921](https://github.com/agda/agda/issues/2921)],
+  the last binding was incorrect, since the argument of
+  singleton type `I` was erased from the constructor `foo` during
+  compilation.  The required shape of `S` was previously
+  ```
+  {-# FOREIGN GHC data S = Foo #-}
+  ```
+  i.e., constructor `Foo` had to have no arguments.
+
+  For the sake of transparency, Haskell constructors bound to
+  Agda constructors now take the same arguments.
+  This is especially important if Haskell bindings are to be
+  produced automatically by third party tool.
+
+Language
+--------
+
+### Builtins
+
+* New primitives
+
+  ```agda
+  primWord64ToNatInjective    : ∀ a b → primWord64ToNat a ≡ primWord64ToNat b → a ≡ b
+
+  primFloatToWord64           : Float → Word64
+  primFloatToWord64Injective  : ∀ a b → primFloatToWord64 a ≡ primFloatToWord64 b → a ≡ b
+
+  primMetaToNat               : Meta → Nat
+  primMetaToNatInjective      : ∀ a b → primMetaToNat a ≡ primMetaToNat b → a ≡ b
+
+  primQNameToWord64s          : Name → Word64 × Word64
+  primQNameToWord64sInjective : ∀ a b → primQNameToWord64s a ≡ primQNameToWord64s b → a ≡ b
+  ```
+
+  These can be used to define safe decidable propositional equality, see issue [agda-stdlib#698](https://github.com/agda/agda-stdlib/issues/698).
+
+* New Primitive for showing Natural numbers:
+
+  ```agda
+  primShowNat : Nat → String
+  ```
+
+  placed in Agda.Builtin.String.
+
+* New primitives for asking Agda to try to solve constraints [[Issue
+  #3791](https://github.com/agda/agda/issues/3791)]:
+
+  ```agda
+  solveConstraints           : TC ⊤
+  solveConstraintsMentioning : List Meta → TC ⊤
+  ```
+
+  The former one tries to solve all constraints, whereas the latter
+  one wakes up all constraints mentioning the given meta-variables,
+  and then tries to solve all awake constraints.
+
+Release notes for Agda version 2.6.0.1
+======================================
+
+Installation and infrastructure
+-------------------------------
+
+* Added support for GHC 8.6.5.
+
+List of all closed issues
+-------------------------
+
+For 2.6.0.1, the following issues have been closed
+(see [bug tracker](https://github.com/agda/agda/issues)):
+
+  -  [#3685](https://github.com/agda/agda/issues/3685): Support GHC 8.6.5
+  -  [#3692](https://github.com/agda/agda/issues/3692): Omission of absurd patterns in automatically added absurd clauses causes too optimistic polarity.
+  -  [#3694](https://github.com/agda/agda/issues/3694): Importing Agda.Builtin.Size in one module affects another module
+  -  [#3696](https://github.com/agda/agda/issues/3696): Make `AgdaAny` polykinded?
+  -  [#3697](https://github.com/agda/agda/issues/3697): Panic when checking non-Setω data definitions with --type-in-type
+  -  [#3701](https://github.com/agda/agda/issues/3701): [ re agda/agda-stdlib#710 ] toNat for machine words is injective
+  -  [#3731](https://github.com/agda/agda/issues/3731): GHC backend thinks that a constructor called 'main' is the main program
+  -  [#3742](https://github.com/agda/agda/issues/3742): Strange error message for code that combines mutual and abstract
 
 Release notes for Agda version 2.6.0
 ====================================
@@ -193,7 +299,7 @@ Type checking
   clauses.
 
   Due to the changes to the coverage checker required for this new
-  feature, Agda will now sometimes construct a different case when
+  feature, Agda will now sometimes construct a different case tree when
   there are multiple valid splitting orders. In some cases this may
   impact the constraints that Agda is able to solve (for example, see
   [#673](https://github.com/agda/agda-stdlib/pull/673) on the
@@ -281,7 +387,8 @@ Instance search
 
 * Explicit arguments are no longer automatically turned into instance
   arguments for the purpose of recursive instance search. Instead,
-  explicit arguments are left unresolved and will thus never be used.
+  explicit arguments are left unresolved and will thus never be used
+  for instance search.
 
   If an instance is declared which has explicit arguments, Agda will
   raise a warning that this instance will never be considered by
@@ -337,7 +444,7 @@ Interaction and error reporting
 -------------------------------
 
 * A new command `agda2-elaborate-give` (C-c C-m) normalizes a goal input
-  (it repects the C-u prefixes), type checks, and inserts the normalized
+  (it respects the C-u prefixes), type checks, and inserts the normalized
   term into the goal.
 
 * 'Solve constraints' (C-c C-s) now turns unsolved metavariables into new

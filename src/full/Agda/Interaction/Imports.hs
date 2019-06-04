@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP               #-}
 
 {-| This module deals with finding imported modules and loading their
     interface files.
@@ -19,7 +18,6 @@ import qualified Data.Map as Map
 import qualified Data.List as List
 import qualified Data.Set as Set
 import qualified Data.Foldable as Fold (toList)
-import qualified Data.List as List
 import Data.Maybe
 import Data.Monoid (mempty, mappend)
 import Data.Map (Map)
@@ -83,7 +81,6 @@ import Agda.Utils.Hash
 import qualified Agda.Utils.HashMap as HMap
 import qualified Agda.Utils.Trie as Trie
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 -- | Some information about the source code.
@@ -474,7 +471,7 @@ checkOptionsCompatible current imported importedModule = flip execStateT True $ 
     implies :: Bool -> Bool -> Bool
     p `implies` q = p <= q
 
-    showOptions opts = P.prettyList (map (\ (o, n) -> P.text n P.<> ": " P.<+> (P.pretty $ o opts))
+    showOptions opts = P.prettyList (map (\ (o, n) -> (P.text n <> ": ") P.<+> (P.pretty $ o opts))
                                  (coinfectiveOptions ++ infectiveOptions))
 
 -- | Check whether interface file exists and is in cache
@@ -775,7 +772,7 @@ writeInterface file i = do
     throwError e
 
 removePrivates :: ScopeInfo -> ScopeInfo
-removePrivates si = si { scopeModules = restrictPrivate <$> scopeModules si }
+removePrivates = over scopeModules $ fmap restrictPrivate
 
 concreteOptionsToOptionPragmas :: [C.Pragma] -> TCM [OptionsPragma]
 concreteOptionsToOptionPragmas p = do
@@ -902,10 +899,10 @@ createInterface file mname isMain msi =
       -- Grabbing warnings and unsolved metas to highlight them
       warnings <- getAllWarnings AllWarnings
       unless (null warnings) $ reportSDoc "import.iface.create" 20 $
-        "collected warnings: " P.<> prettyTCM warnings
+        "collected warnings: " <> prettyTCM warnings
       unsolved <- getAllUnsolved
       unless (null unsolved) $ reportSDoc "import.iface.create" 20 $
-        "collected unsolved: " P.<> prettyTCM unsolved
+        "collected unsolved: " <> prettyTCM unsolved
       let warningInfo = compress $ foldMap warningHighlighting $ unsolved ++ warnings
 
       stSyntaxInfo `modifyTCLens` \inf -> (inf `mappend` toks) `mappend` warningInfo
@@ -941,7 +938,7 @@ createInterface file mname isMain msi =
       -- (then includeStateChanges is True).
       when allowUnsolved $ do
         reportSLn "import.iface.create" 7 $ "Turning unsolved metas (if any) into postulates."
-        withCurrentModule (scopeCurrent scope) $
+        withCurrentModule (scope ^. scopeCurrent) $
           openMetasToPostulates
         -- Clear constraints as they might refer to what
         -- they think are open metas.
@@ -1095,7 +1092,7 @@ buildInterface source fileType topLevel pragmas = do
     reportSLn "import.iface" 5 "Building interface..."
     let m = topLevelModuleName topLevel
     scope'  <- getScope
-    let scope = scope' { scopeCurrent = m }
+    let scope = set scopeCurrent m scope'
     -- Andreas, 2014-05-03: killRange did not result in significant reduction
     -- of .agdai file size, and lost a few seconds performance on library-test.
     -- Andreas, Makoto, 2014-10-18 AIM XX: repeating the experiment

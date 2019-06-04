@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 
 module Agda.Interaction.CommandLine where
 
@@ -33,7 +32,6 @@ import Agda.Utils.Except ( MonadError(catchError) )
 import Agda.Utils.Monad
 import Agda.Utils.Pretty
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 data ExitCode a = Continue | ContinueIn TCEnv | Return a
@@ -265,7 +263,7 @@ showContext (meta:args) = do
     i <- InteractionId <$> readM meta
     mi <- lookupMeta =<< lookupInteractionId i
     withMetaInfo (getMetaInfo mi) $ do
-      ctx <- List.map unDom . telToList <$> getContextTelescope
+      ctx <- List.map I.unDom . telToList <$> getContextTelescope
       zipWithM_ display ctx $ reverse $ zipWith const [1..] ctx
     where
         display (x, t) n = do

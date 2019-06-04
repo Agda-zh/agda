@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                      #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 
 -- | Solving size constraints under hypotheses.
@@ -107,7 +106,6 @@ import Agda.Utils.Size
 import Agda.Utils.Tuple
 import qualified Agda.Utils.VarSet as VarSet
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 type CC = Closure TCM.Constraint
@@ -132,6 +130,7 @@ solveSizeConstraints flag =  do
       [ text $ "Solving constraints (" ++ show flag ++ ")"
       ] ++ map prettyTCM cs0
   let -- Error for giving up
+      cannotSolve :: TCM a
       cannotSolve = typeError . GenericDocError =<<
         vcat ("Cannot solve size constraints" : map prettyTCM cs0)
 
@@ -790,10 +789,10 @@ sizeExpr u = do
       _        -> Nothing
 
 -- | Turn a de size expression into a term.
-unSizeExpr :: DBSizeExpr -> TCM Term
+unSizeExpr :: HasBuiltins m => DBSizeExpr -> m Term
 unSizeExpr a =
   case a of
-    Infty         -> primSizeInf
+    Infty         -> fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinSizeInf
     Rigid r (O n) -> do
       unless (n >= 0) __IMPOSSIBLE__
       sizeSuc n $ var $ rigidIndex r

@@ -117,6 +117,8 @@ Arch Linux
 .. Debian / Ubuntu
 .. ---------------
 
+However, due to significant packaging bugs [such as this](https://bugs.archlinux.org/task/61904?project=5&string=agda), you might want to use alternative installation methods.
+
 Debian / Ubuntu
 ---------------
 

@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP           #-}
 
 module Agda.TypeChecking.Coverage.Match
   ( Match(..), match
@@ -37,12 +36,10 @@ import Agda.TypeChecking.Substitute
 import Agda.Utils.Null
 import Agda.Utils.Permutation
 import Agda.Utils.Pretty ( Pretty(..), text, (<+>), cat , prettyList_ )
-import qualified Agda.Utils.Pretty as P
 import Agda.Utils.Size
 import Agda.Utils.List
 import Agda.Utils.Monad
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 {-| Given
@@ -78,10 +75,10 @@ data SplitPatVar = SplitPatVar
 
 instance Pretty SplitPatVar where
   prettyPrec _ x =
-    (text $ patVarNameToString (splitPatVarName x)) P.<>
-    (text $ "@" ++ show (splitPatVarIndex x)) P.<>
+    (text $ patVarNameToString (splitPatVarName x)) <>
+    (text $ "@" ++ show (splitPatVarIndex x)) <>
     (ifNull (splitExcludedLits x) empty $ \lits ->
-      "\\{" P.<> prettyList_ lits P.<> "}")
+      "\\{" <> prettyList_ lits <> "}")
 
 instance PrettyTCM SplitPatVar where
   prettyTCM = prettyTCM . var . splitPatVarIndex

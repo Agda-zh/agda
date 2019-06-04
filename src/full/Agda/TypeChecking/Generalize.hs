@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 
 module Agda.TypeChecking.Generalize
   ( generalizeType
@@ -51,9 +50,7 @@ import Agda.Utils.Monad
 import Agda.Utils.Size
 import Agda.Utils.Singleton
 import Agda.Utils.Permutation
-import qualified Agda.Utils.Graph.TopSort as Graph
 
-#include "undefined.h"
 
 -- | Generalize a telescope over a set of generalizable variables.
 generalizeTelescope :: Map QName Name -> (forall a. (Telescope -> TCM a) -> TCM a) -> ([Maybe Name] -> Telescope -> TCM a) -> TCM a
@@ -233,7 +230,8 @@ computeGeneralization genRecMeta nameMap allmetas = postponeInstanceConstraints 
   -- Sort metas in dependency order. Include open metas that we are not
   -- generalizing over, since they will need to be pruned appropriately (see
   -- Issue 3672).
-  allSortedMetas <- sortMetas (generalizeOver ++ reallyDontGeneralize)
+  allSortedMetas <- fromMaybeM (typeError GeneralizeCyclicDependency) $
+    dependencySortMetas (generalizeOver ++ reallyDontGeneralize)
   let sortedMetas = filter shouldGeneralize allSortedMetas
 
   let dropCxt err = updateContext (strengthenS err 1) (drop 1)
@@ -690,26 +688,6 @@ createGenValue x = setCurrentRange x $ do
                                 , genvalTerm       = term
                                 , genvalType       = metaType })
 
--- | Sort metas in dependency order.
-sortMetas :: [MetaId] -> TCM [MetaId]
-sortMetas metas = do
-  metaGraph <- concat <$> do
-    forM metas $ \ m -> do
-      deps <- allMetas (\ m' -> if m' `elem` metas then singleton m' else mempty) <$> getType m
-      return [ (m, m') | m' <- Set.toList deps ]
-
-  caseMaybe (Graph.topSort metas metaGraph)
-            (typeError GeneralizeCyclicDependency)
-            return
-
-  where
-    -- Sort metas don't have types, but we still want to sort them.
-    getType m = do
-      mv <- lookupMeta m
-      case mvJudgement mv of
-        IsSort{}                 -> return Nothing
-        HasType{ jMetaType = t } -> Just <$> instantiateFull t
-
 -- | Create a not-yet correct record type for the generalized telescope. It's not yet correct since
 --   we haven't computed the telescope yet, and we need the record type to do it.
 createGenRecordType :: Type -> [MetaId] -> TCM (QName, ConHead, [QName])
@@ -745,7 +723,6 @@ createGenRecordType genRecMeta@(El genRecSort _) sortedMetas = do
                , funTerminates   = Just True
                , funExtLam       = Nothing
                , funWith         = Nothing
-               , funCopatternLHS = False
                , funCovering     = []
                }
   addConstant (conName genRecCon) $ defaultDefn defaultArgInfo (conName genRecCon) __DUMMY_TYPE__ $ -- Filled in later
@@ -772,7 +749,8 @@ createGenRecordType genRecMeta@(El genRecSort _) sortedMetas = do
            , recEtaEquality' = Inferred YesEta
            , recInduction    = Nothing
            , recAbstr        = ConcreteDef
-           , recComp         = emptyCompKit }
+           , recComp         = emptyCompKit
+           }
   reportSDoc "tc.generalize" 40 $ vcat
     [ text "created genRec" <+> text (show genRecFields) ]
   -- Solve the genRecMeta

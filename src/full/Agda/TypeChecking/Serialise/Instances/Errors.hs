@@ -1,5 +1,3 @@
-{-# LANGUAGE RecordWildCards          #-}
-{-# LANGUAGE CPP                      #-}
 {-# OPTIONS_GHC -fno-warn-orphans     #-}
 
 module Agda.TypeChecking.Serialise.Instances.Errors where
@@ -29,7 +27,6 @@ import Agda.Utils.FileName ()
 
 import Agda.Utils.Lens
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 instance EmbPrj TCWarning where
@@ -78,6 +75,8 @@ instance EmbPrj Warning where
   icod_ (InstanceNoOutputTypeName a) = icodeN 20 InstanceNoOutputTypeName a
   icod_ (InstanceArgWithExplicitArg a) = icodeN 21 InstanceArgWithExplicitArg a
   icod_ WrongInstanceDeclaration     = icodeN 22 WrongInstanceDeclaration
+  icod_ (RewriteNonConfluent a b c d) = icodeN 23 RewriteNonConfluent a b c d
+  icod_ (RewriteMaybeNonConfluent a b c) = icodeN 24 RewriteMaybeNonConfluent a b c
 
   value = vcase valu where
       valu [0, a, b]    = valuN UnreachableClauses a b
@@ -103,6 +102,8 @@ instance EmbPrj Warning where
       valu [20, a]      = valuN InstanceNoOutputTypeName a
       valu [21, a]      = valuN InstanceArgWithExplicitArg a
       valu [22]         = valuN WrongInstanceDeclaration
+      valu [23, a, b, c, d] = valuN RewriteNonConfluent a b c d
+      valu [24, a, b, c]    = valuN RewriteMaybeNonConfluent a b c
       valu _ = malformed
 
 instance EmbPrj DeclarationWarning where
@@ -188,10 +189,10 @@ instance EmbPrj Doc where
 
 instance EmbPrj PragmaOptions where
   icod_ = \case
-    PragmaOptions a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm -> icodeN' PragmaOptions a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm
+    PragmaOptions a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm nn -> icodeN' PragmaOptions a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm nn
 
   value = vcase $ \case
-    [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z, aa, bb, cc, dd, ee, ff, gg, hh, ii, jj, kk, ll, mm]   -> valuN PragmaOptions a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm
+    [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z, aa, bb, cc, dd, ee, ff, gg, hh, ii, jj, kk, ll, mm, nn]   -> valuN PragmaOptions a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm nn
     _ -> malformed
 
 instance EmbPrj WarningMode where
