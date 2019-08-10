@@ -8,7 +8,7 @@
 .. Quick Guide to Editing, Type Checking and Compiling Agda Code
 .. *************************************************************
 
-_quick-guide-introduction:
+.. _quick-guide-introduction:
 
 简介
 ====
