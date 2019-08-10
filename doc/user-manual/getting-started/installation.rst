@@ -124,7 +124,7 @@ Debian / Ubuntu
 
 .. Prebuilt packages are available for Debian testing/unstable and Ubuntu from Karmic onwards. To install:
 
-预构建包可在 Debian 的测试/不稳定版和 Ubuntu Karmic 之后的版本上使用。请执行以下命令：
+预构建包可在 Debian 和 Ubuntu Karmic 之后的版本上使用。请执行以下命令：
 
 .. code-block:: bash
 
@@ -136,7 +136,7 @@ Debian / Ubuntu
 
 .. The standard library is available in Debian testing/unstable and Ubuntu from Lucid onwards. To install:
 
-标准库可在 Debian 的测试/不稳定版和 Ubuntu Lucid 之后的版本上使用。请执行以下命令安装：
+标准库可在 Debian 和 Ubuntu Lucid 之后的版本上使用。请执行以下命令安装：
 
 .. code-block:: bash
 
@@ -307,9 +307,9 @@ OS X
 .. =======================================
 
 .. After getting the development version following the instructions in
-.. the `Agda wiki <http://wiki.portal.chalmers.se/agda/pmwiki.php>`_:
+.. the `Agda wiki <https://wiki.portal.chalmers.se/agda/pmwiki.php>`_:
 
-请访问 `Agda wiki <http://wiki.portal.chalmers.se/agda/pmwiki.php>`_ 获得开发版，
+请访问 `Agda wiki <https://wiki.portal.chalmers.se/agda/pmwiki.php>`_ 获得开发版，
 之后执行以下步骤：
 
 .. * Install the :ref:`prerequisites <prerequisites>`

@@ -26,6 +26,7 @@ module Agda.Syntax.Parser.Parser (
 
 import Control.Monad
 
+import Data.Bifunctor (first)
 import Data.Char
 import Data.List
 import Data.Maybe
@@ -41,7 +42,6 @@ import Agda.Syntax.Parser.Tokens
 import Agda.Syntax.Concrete as C
 import Agda.Syntax.Concrete.Attribute
 import Agda.Syntax.Concrete.Pattern
-import Agda.Syntax.Concrete.Pretty ()
 import Agda.Syntax.Common
 import Agda.Syntax.Fixity
 import Agda.Syntax.Notation
@@ -56,7 +56,6 @@ import Agda.Utils.List ( spanJust, chopWhen )
 import Agda.Utils.Monad
 import Agda.Utils.Pretty
 import Agda.Utils.Singleton
-import Agda.Utils.Tuple
 import qualified Agda.Utils.Maybe.Strict as Strict
 
 import Agda.Utils.Impossible
@@ -532,49 +531,33 @@ CommaBIds
 -- at point (x y  it is not clear whether x y is an application or
 -- a variable list. We could be parsing (x y z) -> B
 -- with ((x y) z) being a type.
-CommaBIds :: { [NamedArg BoundName] }
+CommaBIds :: { [NamedArg Binder] }
 CommaBIds : CommaBIdAndAbsurds {%
     case $1 of
       Left ns -> return ns
       Right _ -> parseError $ "expected sequence of bound identifiers, not absurd pattern"
     }
 
-CommaBIdAndAbsurds :: { Either [NamedArg BoundName] [Expr] }
+CommaBIdAndAbsurds :: { Either [NamedArg Binder] [Expr] }
 CommaBIdAndAbsurds
   : Application {% boundNamesOrAbsurd $1 }
-  | QId '=' QId {% fmap (Left . (:[])) $ mkNamedArg (Just $1) (Left $3) }
-  | '_' '=' QId {% fmap (Left . (:[])) $ mkNamedArg Nothing   (Left $3) }
-  | QId '=' '_' {% fmap (Left . (:[])) $ mkNamedArg (Just $1) (Right $ getRange $3) }
-  | '_' '=' '_' {% fmap (Left . (:[])) $ mkNamedArg Nothing   (Right $ getRange $3) }
+  | QId '=' QId {% (Left . pure . updateNamedArg mkBinder) `fmap` mkNamedArg (Just $1) (Left $3) }
+  | '_' '=' QId {% (Left . pure . updateNamedArg mkBinder) `fmap` mkNamedArg Nothing   (Left $3) }
+  | QId '=' '_' {% (Left . pure . updateNamedArg mkBinder) `fmap` mkNamedArg (Just $1) (Right $ getRange $3) }
+  | '_' '=' '_' {% (Left . pure . updateNamedArg mkBinder) `fmap` mkNamedArg Nothing   (Right $ getRange $3) }
 
 -- Parse a sequence of identifiers, including hiding info.
 -- Does not include instance arguments.
 -- E.g. x {y z} _ {v}
 -- To be used in typed bindings, like (x {y z} _ {v} : Nat).
-BIdsWithHiding :: { [NamedArg BoundName] }
+BIdsWithHiding :: { [NamedArg Binder] }
 BIdsWithHiding : Application {%
-    let -- interpret an expression as name
-        getName :: Expr -> Maybe Name
-        getName (Ident (QName x)) = Just x
-        getName (Underscore r _)  = Just (Name r InScope [Hole])
-        getName _                 = Nothing
-
-        getNames :: Expr -> Maybe [Name]
-        getNames (RawApp _ es) = mapM getName es
-        getNames e             = singleton `fmap` getName e
-
-        -- interpret an expression as name or list of hidden names
-        getName1 :: Expr -> Maybe [Arg Name]
-        getName1 (Ident (QName x)) = Just [defaultArg x]
-        getName1 (Underscore r _)  = Just [defaultArg $ Name r InScope [Hole]]
-        getName1 (HiddenArg _ (Named Nothing e))
-                                   = map (setHiding Hidden . defaultArg) `fmap` getNames e
-        getName1 _                 = Nothing
-
-    in
-    case mapM getName1 $1 of
-        Just good -> return $ (map . fmap) (unnamed . mkBoundName_) $ concat good
-        Nothing   -> parseError $ "expected sequence of possibly hidden bound identifiers"
+  -- interpret an expression as a name and maybe a pattern
+  case mapM exprAsNameOrHiddenNames $1 of
+    Nothing   -> parseError "Expected sequence of possibly hidden bound identifiers"
+    Just good -> forM (concat good) $ updateNamedArgA $ \ (n, me) -> do
+                   p <- traverse exprToPattern me
+                   pure $ Binder p (mkBoundName_ n)
     }
 
 
@@ -633,9 +616,9 @@ Expr :: { Expr }
 Expr
   : TeleArrow Expr                      { Pi $1 $2 }
   | Application3 '->' Expr              { Fun (getRange ($1,$2,$3))
-                                              (defaultArg $ RawApp (getRange $1) $1)
+                                              (defaultArg $ rawAppUnlessSingleton (getRange $1) $1)
                                               $3 }
-  | Attributes1 Application3 '->' Expr  {% applyAttrs $1 (defaultArg $ RawApp (getRange ($1,$2)) $2) <&> \ dom ->
+  | Attributes1 Application3 '->' Expr  {% applyAttrs $1 (defaultArg $ rawAppUnlessSingleton (getRange ($1,$2)) $2) <&> \ dom ->
                                              Fun (getRange ($1,$2,$3,$4)) dom $4 }
   | Expr1 '=' Expr                      { Equal (getRange ($1, $2, $3)) $1 $3 }
   | Expr1 %prec LOWEST                  { $1 }
@@ -845,7 +828,7 @@ TBind : CommaBIds ':' Expr  {
 ModalTBind :: { TypedBinding }
 ModalTBind : Attributes1 CommaBIds ':' Expr  {% do
     let r = getRange ($1,$2,$3,$4) -- the range is approximate only for TypedBindings
-    xs <- mapM (applyAttrs $1) $2
+    xs <- mapM (applyAttrs $1 . setTacticAttr $1) $2
     return $ TBind r xs $4
   }
 
@@ -859,7 +842,7 @@ TBindWithHiding : BIdsWithHiding ':' Expr  {
 ModalTBindWithHiding :: { TypedBinding }
 ModalTBindWithHiding : Attributes1 BIdsWithHiding ':' Expr  {% do
     let r = getRange ($1,$2,$3,$4) -- the range is approximate only for TypedBindings
-    xs <- mapM (applyAttrs $1) $2
+    xs <- mapM (applyAttrs $1 . setTacticAttr $1) $2
     return $ TBind r xs $4
   }
 
@@ -994,29 +977,34 @@ DomainFreeBinding
                              Right _ -> parseError "expected sequence of bound identifiers, not absurd pattern"
                           }
 
+MaybeAsPattern :: { Maybe Pattern }
+MaybeAsPattern
+  : '@' Expr3   {% fmap Just (exprToPattern $2) }
+  | {- empty -} { Nothing }
+
 -- A domain free binding is either x or {x1 .. xn}
 DomainFreeBindingAbsurd :: { Either [LamBinding] [Expr]}
 DomainFreeBindingAbsurd
-    : BId               { Left [DomainFree $ defaultNamedArg $ mkBoundName_ $1]  }
-    | '.' BId           { Left [DomainFree $ setRelevance Irrelevant $ defaultNamedArg $ mkBoundName_ $2]  }
-    | '..' BId          { Left [DomainFree $ setRelevance NonStrict $ defaultNamedArg $ mkBoundName_ $2]  }
-    | '(' CommaBIdAndAbsurds ')'
-         { mapLeft (map DomainFree) $2 }
+    : BId      MaybeAsPattern { Left [mkDomainFree_ id $2 $1]  }
+    | '.' BId  MaybeAsPattern { Left [mkDomainFree_ (setRelevance Irrelevant) $3 $2]  }
+    | '..' BId MaybeAsPattern { Left [mkDomainFree_ (setRelevance NonStrict) $3 $2]  }
+    | '(' Application ')'     {% exprToPattern (RawApp (getRange $2) $2) >>= \ p ->
+                                 pure $ Left [mkDomainFree_ id (Just p) (Name (getRange $2) InScope [Hole])] }
     | '(' Attributes1 CommaBIdAndAbsurds ')'
          {% applyAttrs $2 defaultArgInfo <&> \ ai ->
-              mapLeft (map (DomainFree . setArgInfo ai)) $3 }
+              mapLeft (map (DomainFree . setTacticAttr $2 . setArgInfo ai)) $3 }
     | '{' CommaBIdAndAbsurds '}'
-         { mapLeft (map (DomainFree . setHiding Hidden)) $2 }
+         { mapLeft (map (DomainFree . hide)) $2 }
     | '{' Attributes1 CommaBIdAndAbsurds '}'
          {% applyAttrs $2 defaultArgInfo <&> \ ai ->
-              mapLeft (map (DomainFree . setHiding Hidden . setArgInfo ai)) $3 }
+              mapLeft (map (DomainFree . hide . setTacticAttr $2 . setArgInfo ai)) $3 }
     | '{{' CommaBIds DoubleCloseBrace { Left $ map (DomainFree . makeInstance) $2 }
     | '{{' Attributes1 CommaBIds DoubleCloseBrace
          {% applyAttrs $2 defaultArgInfo <&> \ ai ->
-              Left $ map (DomainFree . makeInstance . setArgInfo ai) $3 }
-    | '.' '{' CommaBIds '}' { Left $ map (DomainFree . setHiding Hidden . setRelevance Irrelevant) $3 }
+              Left $ map (DomainFree . makeInstance . setTacticAttr $2 . setArgInfo ai) $3 }
+    | '.' '{' CommaBIds '}' { Left $ map (DomainFree . hide . setRelevance Irrelevant) $3 }
     | '.' '{{' CommaBIds DoubleCloseBrace { Left $ map (DomainFree . makeInstance . setRelevance Irrelevant) $3 }
-    | '..' '{' CommaBIds '}' { Left $ map (DomainFree . setHiding Hidden . setRelevance NonStrict) $3 }
+    | '..' '{' CommaBIds '}' { Left $ map (DomainFree . hide . setRelevance NonStrict) $3 }
     | '..' '{{' CommaBIds DoubleCloseBrace { Left $ map (DomainFree . makeInstance . setRelevance NonStrict) $3 }
 
 
@@ -1110,26 +1098,29 @@ CommaImportNames1
 -- A left hand side of a function clause. We parse it as an expression, and
 -- then check that it is a valid left hand side.
 LHS :: { LHS }
-LHS : Expr1 RewriteEquations WithExpressions
-        {% exprToLHS $1 >>= \p -> return (p $2 $3) }
+LHS : Expr1 WithRewriteExpressions
+        {% exprToLHS $1      >>= \p ->
+           buildWithBlock $2 >>= \ (rs, es) ->
+           return (p rs es)
+        }
 
-WithExpressions :: { [Expr] }
-WithExpressions
+WithRewriteExpressions :: { [Either RewriteEqn [Expr]] }
+WithRewriteExpressions
   : {- empty -} { [] }
-  | 'with' Expr
-      { case $2 of { WithApp _ e es -> e : es; e -> [e] } }
+  | 'with' Expr1 WithRewriteExpressions
+    {% fmap (++ $3) (buildWithStmt $2)  }
+  | 'rewrite' Expr1 WithRewriteExpressions
+    { Left (Rewrite $ fromWithApp $2) : $3 }
 
-RewriteEquations :: { [Expr] }
-RewriteEquations
-  : {- empty -} { [] }
-  | 'rewrite' Expr1
-      { case $2 of { WithApp _ e es -> e : es; e -> [e] } }
-
--- Parsing either an expression @e@ or a @rewrite e1 | ... | en@.
+-- Parsing either an expression @e@ or a @(rewrite | with p <-) e1 | ... | en@.
 HoleContent :: { HoleContent }
 HoleContent
-  : Expr             { HoleContentExpr    $1 }
-  | RewriteEquations { HoleContentRewrite $1 }
+  : Expr                   {  HoleContentExpr    $1 }
+  | WithRewriteExpressions
+    {% fmap HoleContentRewrite $ forM $1 $ \case
+         Left r  -> pure r
+         Right{} -> parseError "Cannot declare a 'with' abstraction from inside a hole."
+      }
 
 -- Where clauses are optional.
 WhereClause :: { WhereClause }
@@ -1149,7 +1140,7 @@ ExprWhere : Expr WhereClause { ExprWhere $1 $2 }
 -- Top-level definitions.
 Declaration :: { [Declaration] }
 Declaration
-    : Fields        {  $1  }
+    : Fields        { [$1] }
     | FunClause     {  $1  }  -- includes type signatures
     | Data          { [$1] }
     | DataSig       { [$1] }  -- lone data type signature in mutual block
@@ -1262,21 +1253,21 @@ Infix : 'infix'  Int SpaceBIds  { Infix (Fixity (getRange ($1,$3)) (Related $2) 
       | 'infixr' Int SpaceBIds  { Infix (Fixity (getRange ($1,$3)) (Related $2) RightAssoc) $3 }
 
 -- Field declarations.
-Fields :: { [Declaration] }
-Fields : 'field' ArgTypeSignatures
+Fields :: { Declaration }
+Fields : 'field' ArgTypeSignaturesOrEmpty
             { let
                 inst i = case getHiding i of
                            Instance _ -> InstanceDef
                            _          -> NotInstanceDef
-                toField (Arg info (TypeSig info' x t)) = Field (inst info') x (Arg info t)
-              in map toField $2 }
+                toField (Arg info (TypeSig info' x t)) = FieldSig (inst info') x (Arg info t)
+              in Field (fuseRange $1 $2) $ map toField $2 }
   -- | 'field' ModalArgTypeSignatures
   --           { let
   --               inst i = case getHiding i of
   --                          Instance _ -> InstanceDef
   --                          _          -> NotInstanceDef
-  --               toField (Arg info (TypeSig info' x t)) = Field (inst info') x (Arg info t)
-  --             in map toField $2 }
+  --               toField (Arg info (TypeSig info' x t)) = FieldSig (inst info') x (Arg info t)
+  --             in Field (fuseRange $1 $2) $ map toField $2 }
 
 -- Variable declarations for automatic generalization
 Generalize :: { [Declaration] }
@@ -1360,8 +1351,8 @@ HoleName
   : SimpleTopHole { defaultNamedArg $1 }
   | '{'  SimpleHole '}'  { hide         $ defaultNamedArg $2 }
   | '{{' SimpleHole '}}' { makeInstance $ defaultNamedArg $2 }
-  | '{'  SimpleId '=' SimpleHole '}'  { hide         $ defaultArg $ named $2 $4 }
-  | '{{' SimpleId '=' SimpleHole '}}' { makeInstance $ defaultArg $ named $2 $4 }
+  | '{'  SimpleId '=' SimpleHole '}'  { hide         $ defaultArg $ userNamed $2 $4 }
+  | '{{' SimpleId '=' SimpleHole '}}' { makeInstance $ defaultArg $ userNamed $2 $4 }
 
 SimpleTopHole :: { HoleName }
 SimpleTopHole
@@ -1917,6 +1908,12 @@ mkQName ss = do
     xs <- mapM mkName ss
     return $ foldr Qual (QName $ last xs) (init xs)
 
+-- | Create a DomainFree binding from a name
+
+mkDomainFree_ :: (NamedArg Binder -> NamedArg Binder) -> Maybe Pattern -> Name -> LamBinding
+mkDomainFree_ f p n = DomainFree $ f $ defaultNamedArg $ Binder p $ mkBoundName_ n
+
+
 -- | Create a qualified name from a string (used in pragmas).
 --   Range of each name component is range of whole string.
 --   TODO: precise ranges!
@@ -1929,12 +1926,12 @@ pragmaQName (r, s) = do
 mkNamedArg :: Maybe QName -> Either QName Range -> Parser (NamedArg BoundName)
 mkNamedArg x y = do
   lbl <- case x of
-           Nothing        -> return $ Just $ unranged "_"
-           Just (QName x) -> return $ Just $ Ranged (getRange x) (prettyShow x)
+           Nothing        -> return $ Just $ WithOrigin UserWritten $ unranged "_"
+           Just (QName x) -> return $ Just $ WithOrigin UserWritten $ Ranged (getRange x) $ prettyShow x
            _              -> parseError "expected unqualified variable name"
   var <- case y of
-           Left (QName y) -> return $ BName y noFixity'
-           Right r        -> return $ BName (noName r) noFixity'
+           Left (QName y) -> return $ mkBoundName y noFixity'
+           Right r        -> return $ mkBoundName (noName r) noFixity'
            _              -> parseError "expected unqualified variable name"
   return $ defaultArg $ Named lbl var
 
@@ -1979,53 +1976,131 @@ isName s (_,s')
 forallPi :: [LamBinding] -> Expr -> Expr
 forallPi bs e = Pi (map addType bs) e
 
+-- | Builds a 'RawApp' from 'Range' and 'Expr' list, unless the list
+-- is a single expression.  In the latter case, just the 'Expr' is
+-- returned.
+rawAppUnlessSingleton :: Range -> [Expr] -> Expr
+rawAppUnlessSingleton r = \case
+  []  -> __IMPOSSIBLE__
+  [e] -> e
+  es  -> RawApp r es
+
 -- | Converts lambda bindings to typed bindings.
 addType :: LamBinding -> TypedBinding
 addType (DomainFull b) = b
 addType (DomainFree x) = TBind r [x] $ Underscore r Nothing
   where r = getRange x
 
-boundNamesOrAbsurd :: [Expr] -> Parser (Either [NamedArg BoundName] [Expr])
+-- | Interpret an expression as a list of names and (not parsed yet) as-patterns
+
+exprAsTele :: Expr -> [Expr]
+exprAsTele (RawApp _ es) = es
+exprAsTele e             = [e]
+
+exprAsNamesAndPatterns :: Expr -> Maybe [(Name, Maybe Expr)]
+exprAsNamesAndPatterns = mapM exprAsNameAndPattern . exprAsTele
+
+exprAsNameAndPattern :: Expr -> Maybe (Name, Maybe Expr)
+exprAsNameAndPattern (Ident (QName x)) = Just (x, Nothing)
+exprAsNameAndPattern (Underscore r _)  = Just (Name r InScope [Hole], Nothing)
+exprAsNameAndPattern (As _ n e)        = Just (n, Just e)
+exprAsNameAndPattern (Paren r e)       = Just (Name r InScope [Hole], Just e)
+exprAsNameAndPattern _                 = Nothing
+
+-- interpret an expression as name or list of hidden / instance names
+exprAsNameOrHiddenNames :: Expr -> Maybe [NamedArg (Name, Maybe Expr)]
+exprAsNameOrHiddenNames t = case t of
+  HiddenArg _ (Named Nothing e) -> do
+    nps <- exprAsNamesAndPatterns e
+    pure $ map (hide . defaultNamedArg) nps
+  InstanceArg _ (Named Nothing e) -> do
+    nps <- exprAsNamesAndPatterns e
+    pure $ map (makeInstance . defaultNamedArg) nps
+  e -> (pure . defaultNamedArg) `fmap` exprAsNameAndPattern e
+
+boundNamesOrAbsurd :: [Expr] -> Parser (Either [NamedArg Binder] [Expr])
 boundNamesOrAbsurd es
   | any isAbsurd es = return $ Right es
   | otherwise       =
-    case mapM getBName es of
-        Just good -> return $ Left $ map defaultNamedArg good
+    case mapM exprAsNameAndPattern es of
         Nothing   -> parseError $ "expected sequence of bound identifiers"
-  where
-    getName :: Expr -> Maybe Name
-    getName (Ident (QName x)) = Just x
-    getName (Underscore r _)  = Just $ Name r NotInScope [Hole]
-    getName _                 = Nothing
+        Just good -> fmap Left $ forM good $ \ (n, me) -> do
+                       p <- traverse exprToPattern me
+                       return (defaultNamedArg (Binder p (mkBoundName_ n)))
 
-    getBName :: Expr -> Maybe BoundName
-    getBName e = fmap mkBoundName_ $ getName e
+  where
 
     isAbsurd :: Expr -> Bool
     isAbsurd (Absurd _)                  = True
     isAbsurd (HiddenArg _ (Named _ e))   = isAbsurd e
     isAbsurd (InstanceArg _ (Named _ e)) = isAbsurd e
-    isAbsurd (Paren _ expr)              = isAbsurd expr
-    isAbsurd (RawApp _ exprs)            = any isAbsurd exprs
+    isAbsurd (Paren _ e)                 = isAbsurd e
+    isAbsurd (As _ _ e)                  = isAbsurd e
+    isAbsurd (RawApp _ es)               = any isAbsurd es
     isAbsurd _                           = False
 
--- | Build a do-statement
-buildDoStmt :: Expr -> [LamClause] -> Parser DoStmt
-buildDoStmt (RawApp r [e]) cs = buildDoStmt e cs
-buildDoStmt (Let r ds Nothing) [] = return $ DoLet r ds
-buildDoStmt (RawApp r es) cs
+-- | Match a pattern-matching "assignment" statement @p <- e@
+exprToAssignment :: Expr -> Parser (Maybe (Pattern, Range, Expr))
+exprToAssignment (RawApp r es)
   | (es1, arr : es2) <- break isLeftArrow es =
     case filter isLeftArrow es2 of
       arr : _ -> parseError' (rStart' $ getRange arr) $ "Unexpected " ++ prettyShow arr
-      [] -> DoBind (getRange arr)
-              <$> exprToPattern (RawApp (getRange es1) es1)
-              <*> pure (RawApp (getRange es2) es2)
-              <*> pure cs
+      [] -> Just <$> ((,,) <$> exprToPattern (RawApp (getRange es1) es1)
+                           <*> pure (getRange arr)
+                           <*> pure (RawApp (getRange es2) es2))
   where
-    isLeftArrow (Ident (QName (Name _ _ [Id arr]))) = elem arr ["<-", "←"]
+    isLeftArrow (Ident (QName (Name _ _ [Id arr]))) = arr `elem` ["<-", "←"]
     isLeftArrow _ = False
-buildDoStmt e (_ : _) = parseError' (rStart' $ getRange e) "Only pattern matching do-statements can have where clauses."
-buildDoStmt e [] = return $ DoThen e
+exprToAssignment _ = pure Nothing
+
+-- | Build a with-block
+buildWithBlock :: [Either RewriteEqn [Expr]] -> Parser ([RewriteEqn], [Expr])
+buildWithBlock rees = case groupByEither rees of
+  (Left rs : rest) -> (rs,) <$> finalWith rest
+  rest             -> ([],) <$> finalWith rest
+
+  where
+
+    finalWith :: [Either [RewriteEqn] [[Expr]]] -> Parser [Expr]
+    finalWith []             = pure $ []
+    finalWith [Right ees]    = pure $ concat ees
+    finalWith (Right{} : tl) = parseError' (rStart' $ getRange tl)
+      "Cannot use rewrite / pattern-matching with after a with-abstraction."
+
+-- | Build a with-statement
+buildWithStmt :: Expr -> Parser [Either RewriteEqn [Expr]]
+buildWithStmt e = do
+  es <- mapM buildSingleWithStmt $ fromWithApp e
+  let ees = groupByEither es
+  pure $ map (mapLeft Invert) ees
+
+buildSingleWithStmt :: Expr -> Parser (Either (Pattern, Expr) Expr)
+buildSingleWithStmt e = do
+  mpatexpr <- exprToAssignment e
+  pure $ case mpatexpr of
+    Just (pat, _, expr) -> Left (pat, expr)
+    Nothing             -> Right e
+
+fromWithApp :: Expr -> [Expr]
+fromWithApp = \case
+  WithApp _ e es -> e : es
+  e              -> [e]
+
+-- | Build a do-statement
+defaultBuildDoStmt :: Expr -> [LamClause] -> Parser DoStmt
+defaultBuildDoStmt e (_ : _) = parseError' (rStart' $ getRange e) "Only pattern matching do-statements can have where clauses."
+defaultBuildDoStmt e []      = pure $ DoThen e
+
+buildDoStmt :: Expr -> [LamClause] -> Parser DoStmt
+buildDoStmt (RawApp r [e])     cs = buildDoStmt e cs
+buildDoStmt (Let r ds Nothing) [] = return $ DoLet r ds
+buildDoStmt e@(RawApp r es)    cs = do
+  mpatexpr <- exprToAssignment e
+  case mpatexpr of
+    Just (pat, r, expr) -> pure $ DoBind r pat expr cs
+    Nothing -> defaultBuildDoStmt e cs
+buildDoStmt e cs = defaultBuildDoStmt e cs
+
 
 mergeImportDirectives :: [ImportDirective] -> Parser ImportDirective
 mergeImportDirectives is = do
@@ -2122,40 +2197,15 @@ validHaskellModuleName = all ok . splitOnDots
  --------------------------------------------------------------------------}
 
 -- | Turn an expression into a left hand side.
-exprToLHS :: Expr -> Parser ([Expr] -> [Expr] -> LHS)
+exprToLHS :: Expr -> Parser ([RewriteEqn] -> [Expr] -> LHS)
 exprToLHS e = LHS <$> exprToPattern e
 
 -- | Turn an expression into a pattern. Fails if the expression is not a
 --   valid pattern.
 exprToPattern :: Expr -> Parser Pattern
-exprToPattern e = do
-    let failure = parseErrorRange e $ "Not a valid pattern: " ++ prettyShow e
-    case e of
-        Ident x                 -> return $ IdentP x
-        App _ e1 e2             -> AppP <$> exprToPattern e1
-                                        <*> T.mapM (T.mapM exprToPattern) e2
-        Paren r e               -> ParenP r
-                                        <$> exprToPattern e
-        Underscore r _          -> return $ WildP r
-        Absurd r                -> return $ AbsurdP r
-        As r x e                -> AsP r x <$> exprToPattern e
-        Dot r (HiddenArg _ e)   -> return $ HiddenP r $ fmap (DotP r) e
-        Dot r e                 -> return $ DotP r e
-        Lit l                   -> return $ LitP l
-        HiddenArg r e           -> HiddenP r <$> T.mapM exprToPattern e
-        InstanceArg r e         -> InstanceP r <$> T.mapM exprToPattern e
-        RawApp r es             -> RawAppP r <$> mapM exprToPattern es
-        Quote r                 -> return $ QuoteP r
-        Rec r es | Just fs <- mapM maybeLeft es -> do
-          RecP r <$> T.mapM (T.mapM exprToPattern) fs
-        Equal r e1 e2           -> return $ EqualP r [(e1, e2)]
-        Ellipsis r              -> return $ EllipsisP r
-        -- WithApp has already lost the range information of the bars '|'
-        WithApp r e es          -> do
-          p  <- exprToPattern e
-          ps <- forM es $ \ e -> defaultNamedArg . WithP (getRange e) <$> exprToPattern e  -- TODO #2822: Range!
-          return $ foldl AppP p ps
-        _ -> failure
+exprToPattern e = case C.isPattern e of
+  Nothing -> parseErrorRange e $ "Not a valid pattern: " ++ prettyShow e
+  Just p  -> pure p
 
 opAppExprToPattern :: OpApp Expr -> Parser Pattern
 opAppExprToPattern (SyntaxBindingLambda _ _ _) = parseError "Syntax binding lambda cannot appear in a pattern"
@@ -2180,18 +2230,20 @@ isEqual e =
 maybeNamed :: Expr -> Named_ Expr
 maybeNamed e =
   case isEqual e of
-    Just (Ident (QName x), b) -> named (Ranged (getRange x) (nameToRawName x)) b
+    Just (Ident (QName x), b) -> named nm b
+      where nm = WithOrigin UserWritten $ Ranged (getRange x) $ nameToRawName x
     _                         -> unnamed e
 
 patternSynArgs :: [Either Hiding LamBinding] -> Parser [Arg Name]
 patternSynArgs = mapM pSynArg
   where
-    pSynArg Left{}                   = parseError "Absurd patterns are not allowed in pattern synonyms"
-    pSynArg (Right DomainFull{})     = parseError "Unexpected type signature in pattern synonym argument"
+    pSynArg Left{}                  = parseError "Absurd patterns are not allowed in pattern synonyms"
+    pSynArg (Right DomainFull{})    = parseError "Unexpected type signature in pattern synonym argument"
     pSynArg (Right (DomainFree x))
-      | let h = getHiding x, h `notElem` [Hidden, NotHidden] = parseError $ prettyShow h ++ " arguments not allowed to pattern synonyms"
-      | getRelevance x /= Relevant                = parseError "Arguments to pattern synonyms must be relevant"
-      | otherwise                                 = return $ fmap (boundName . namedThing) x
+      | let h = getHiding x, h `notElem` [Hidden, NotHidden]
+         = parseError $ prettyShow h ++ " arguments not allowed to pattern synonyms"
+      | not (isRelevant x) = parseError "Arguments to pattern synonyms must be relevant"
+      | otherwise          = return $ fmap (boundName . binderName . namedThing) x
 
 parsePanic s = parseError $ "Internal parser error: " ++ s ++ ". Please report this as a bug."
 
@@ -2257,8 +2309,8 @@ instance SetRange Attr where
   setRange r (Attr _ x a) = Attr r x a
 
 -- | Parse an attribute.
-toAttribute :: (HasRange e, Pretty e) => e -> Parser Attr
-toAttribute x = maybe failure (return . Attr (getRange x) y) $ stringToAttribute y
+toAttribute :: Expr -> Parser Attr
+toAttribute x = maybe failure (return . Attr (getRange x) y) $ exprToAttribute x
   where
   y = prettyShow x
   failure = parseErrorRange x $ "Unknown attribute: " ++ y
@@ -2280,7 +2332,16 @@ applyAttrs rattrs arg = do
   let attrs = reverse rattrs
   checkForUniqueAttribute (isJust . isQuantityAttribute ) attrs
   checkForUniqueAttribute (isJust . isRelevanceAttribute) attrs
+  checkForUniqueAttribute (isJust . isTacticAttribute)    attrs
   foldM (flip applyAttr) arg attrs
+
+-- | Set the tactic attribute if present.
+setTacticAttr :: [Attr] -> NamedArg Binder -> NamedArg Binder
+setTacticAttr as = updateNamedArg $ fmap $ \ b ->
+  case tacticAttributes [ a | Attr _ _ a <- as ] of
+    [TacticAttribute e] -> b{ bnameTactic = Just e }
+    []                  -> b
+    _                   -> __IMPOSSIBLE__
 
 -- | Report a parse error if two attributes in the list are of the same kind,
 --   thus, present conflicting information.

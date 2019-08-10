@@ -38,9 +38,7 @@ Some other tricks that improves performance:
 module Agda.TypeChecking.Reduce.Fast
   ( fastReduce, fastNormalise ) where
 
-import Control.Arrow (first, second)
 import Control.Applicative hiding (empty)
-import Control.Monad.Reader
 import Control.Monad.ST
 import Control.Monad.ST.Unsafe (unsafeSTToIO, unsafeInterleaveST)
 
@@ -50,7 +48,6 @@ import qualified Data.IntMap as IntMap
 import qualified Data.IntSet as IntSet
 import qualified Data.List as List
 import Data.Traversable (traverse)
-import Data.Coerce
 import Data.Semigroup ((<>))
 
 import System.IO.Unsafe (unsafePerformIO)
@@ -67,11 +64,8 @@ import Agda.TypeChecking.CompiledClause
 import Agda.TypeChecking.Monad hiding (Closure(..))
 import Agda.TypeChecking.Reduce as R
 import Agda.TypeChecking.Rewriting (rewrite)
-import Agda.TypeChecking.Reduce.Monad as RedM
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Monad.Builtin hiding (constructorForm)
-import Agda.TypeChecking.CompiledClause.Match ()
-import Agda.TypeChecking.Free.Precompute
 
 import Agda.Interaction.Options
 
@@ -79,9 +73,7 @@ import Agda.Utils.Float
 import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.Maybe
-import Agda.Utils.Memo
 import Agda.Utils.Null (empty)
-import Agda.Utils.Function
 import Agda.Utils.Functor
 import Agda.Utils.Pretty
 import Agda.Utils.Size
@@ -299,13 +291,14 @@ data FastCase c = FBranches
     -- ^ (if True) In case of non-canonical argument use catchAllBranch.
   }
 
-noBranches :: FastCase a
-noBranches = FBranches{ fprojPatterns   = False
-                      , fconBranches    = Map.empty
-                      , fsucBranch      = Nothing
-                      , flitBranches    = Map.empty
-                      , fcatchAllBranch = Nothing
-                      , ffallThrough    = False }
+--UNUSED Liang-Ting Chen 2019-07-16
+--noBranches :: FastCase a
+--noBranches = FBranches{ fprojPatterns   = False
+--                      , fconBranches    = Map.empty
+--                      , fsucBranch      = Nothing
+--                      , flitBranches    = Map.empty
+--                      , fcatchAllBranch = Nothing
+--                      , ffallThrough    = False }
 
 -- | Case tree with bodies.
 
@@ -408,8 +401,8 @@ fastReduce' norm v = do
     rewr <- if rwr then instantiateRewriteRules =<< getRewriteRulesFor f
                    else return []
     compactDef bEnv info rewr
-  let flags = ReductionFlags{ allowNonTerminating = elem NonTerminatingReductions allowedReductions
-                            , allowUnconfirmed    = elem UnconfirmedReductions allowedReductions
+  let flags = ReductionFlags{ allowNonTerminating = NonTerminatingReductions `elem` allowedReductions
+                            , allowUnconfirmed    = UnconfirmedReductions `elem` allowedReductions
                             , hasRewriting        = rwr }
   ReduceM $ \ redEnv -> reduceTm redEnv bEnv (memoQName constInfo) norm flags v
 
@@ -510,9 +503,9 @@ newtype Env s = Env [Pointer s]
 
 emptyEnv :: Env s
 emptyEnv = Env []
-
-isEmptyEnv :: Env s -> Bool
-isEmptyEnv (Env xs) = null xs
+--UNUSED Liang-Ting Chen 2019-07-16
+--isEmptyEnv :: Env s -> Bool
+--isEmptyEnv (Env xs) = null xs
 
 envSize :: Env s -> Int
 envSize (Env xs) = length xs
@@ -1219,7 +1212,7 @@ reduceTm rEnv bEnv !constInfo normalisation ReductionFlags{..} =
             (spine0, Proj o p : spine1) ->
               case lookupCon p bs <|> ((`lookupCon` bs) =<< op) of
                 Nothing
-                  | elem f partialDefs -> stuckMatch (NotBlocked MissingClauses ()) stack ctrl
+                  | f `elem` partialDefs -> stuckMatch (NotBlocked MissingClauses ()) stack ctrl
                   | otherwise          -> __IMPOSSIBLE__
                 Just cc -> runAM (Match f cc (spine0 <> spine1) stack ctrl)
               where CFun{ cfunProjection = op } = cdefDef (constInfo p)
@@ -1335,13 +1328,13 @@ reduceTm rEnv bEnv !constInfo normalisation ReductionFlags{..} =
     stuckMatch :: Blocked_ -> MatchStack s -> ControlStack s -> ST s (Blocked Term)
     stuckMatch blk (_ :> cl) ctrl = rewriteAM (Eval (mkValue blk cl) ctrl)
 
-    -- On a mismatch we find the the next 'CatchAll' on the control stack and
+    -- On a mismatch we find the next 'CatchAll' on the control stack and
     -- continue matching from there. If there isn't one we get an incomplete
     -- matching error (or get stuck if the function is marked partial).
     failedMatch :: QName -> MatchStack s -> ControlStack s -> ST s (Blocked Term)
     failedMatch f (CatchAll cc spine : stack :> cl) ctrl = runAM (Match f cc spine (stack :> cl) ctrl)
     failedMatch f ([] :> cl) ctrl
-      | elem f partialDefs = rewriteAM (Eval (mkValue (NotBlocked MissingClauses ()) cl) ctrl)
+      | f `elem` partialDefs = rewriteAM (Eval (mkValue (NotBlocked MissingClauses ()) cl) ctrl)
       | otherwise          = runReduce $
           traceSLn "impossible" 10 ("Incomplete pattern matching when applying " ++ show f)
                    __IMPOSSIBLE__

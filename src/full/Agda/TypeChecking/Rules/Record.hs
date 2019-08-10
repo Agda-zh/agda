@@ -4,10 +4,8 @@ module Agda.TypeChecking.Rules.Record where
 
 import Prelude hiding (null)
 
-import Control.Applicative hiding (empty)
 import Control.Monad
 import Data.Maybe
-import qualified Data.Set as Set
 
 import Agda.Interaction.Options
 
@@ -17,12 +15,9 @@ import Agda.Syntax.Internal
 import Agda.Syntax.Internal.Pattern
 import Agda.Syntax.Position
 import qualified Agda.Syntax.Info as Info
-import Agda.Syntax.Scope.Monad (freshAbstractQName)
-import Agda.Syntax.Fixity
 
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Builtin
-import Agda.TypeChecking.Names
 import Agda.TypeChecking.Primitive
 import Agda.TypeChecking.Rewriting.Confluence
 import Agda.TypeChecking.Substitute
@@ -44,6 +39,7 @@ import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Null
 import Agda.Utils.Permutation
+import Agda.Utils.POMonoid
 import qualified Agda.Utils.Pretty as P
 import Agda.Utils.Size
 
@@ -228,9 +224,10 @@ checkRecDef i name uc ind eta con (A.DataDefParams gpars ps) contel fields =
               , conData   = name
               , conAbstr  = Info.defAbstract conInfo
               , conInd    = conInduction
-              , conComp   = (emptyCompKit, Nothing) -- filled in later
+              , conComp   = emptyCompKit  -- filled in later
+              , conProj   = Nothing       -- filled in later
               , conForced = []
-              , conErased = []
+              , conErased = Nothing
               }
 
       -- Declare the constructor as eligible for instance search
@@ -332,33 +329,35 @@ checkRecDef i name uc ind eta con (A.DataDefParams gpars ps) contel fields =
 
 
 addCompositionForRecord
-  :: QName      -- datatype name
-               -> ConHead
-               -> Telescope   -- Γ parameters
-               -> [Arg QName] -- projection names
-               -> Telescope   -- Γ ⊢ Φ field types
-               -> Type        -- Γ ⊢ T target type
-               -> TCM ()
+  :: QName       -- ^ Datatype name.
+  -> ConHead
+  -> Telescope   -- ^ @Γ@ parameters.
+  -> [Arg QName] -- ^ Projection names.
+  -> Telescope   -- ^ @Γ ⊢ Φ@ field types.
+  -> Type        -- ^ @Γ ⊢ T@ target type.
+  -> TCM ()
 addCompositionForRecord name con tel fs ftel rect = do
-  compWays <- do
-    cxt <- getContextTelescope
-    escapeContext (size cxt) $
-      if null fs then Left . (,Just []) <$> defineCompData name con (abstract cxt tel) [] ftel rect []
-                 else Right <$>
-                      ifM (return (any (== Irrelevant) $ map getRelevance fs) `and2M` do not . optIrrelevantProjections <$> pragmaOptions)
-                          (return emptyCompKit)
-                          (defineCompKitR name (abstract cxt tel) ftel fs rect)
-  case compWays of
-    Right kit -> do
-      modifySignature $ updateDefinition name $ updateTheDef $ \ d ->
-        case d of
-          r@Record{} -> r { recComp = kit }
-          _          -> __IMPOSSIBLE__
-    Left y -> do
-      modifySignature $ updateDefinition (conName con) $ updateTheDef $ \ d ->
-        case d of
-          r@Constructor{} -> r { conComp = y }
-          _          -> __IMPOSSIBLE__
+  cxt <- getContextTelescope
+  inTopContext $ do
+
+    -- Record has no fields: attach composition data to record constructor
+    if null fs then do
+      kit <- defineCompData name con (abstract cxt tel) [] ftel rect []
+      modifySignature $ updateDefinition (conName con) $ updateTheDef $ \case
+        r@Constructor{} -> r { conComp = kit, conProj = Just [] }  -- no projections
+        _ -> __IMPOSSIBLE__
+
+    -- Record has fields: attach composition data to record type
+    else do
+      -- If record has irrelevant fields but irrelevant projections are disabled,
+      -- we cannot generate composition data.
+      kit <- ifM (return (any isIrrelevant fs)
+                  `and2M` do not . optIrrelevantProjections <$> pragmaOptions)
+        {-then-} (return emptyCompKit)
+        {-else-} (defineCompKitR name (abstract cxt tel) ftel fs rect)
+      modifySignature $ updateDefinition name $ updateTheDef $ \case
+        r@Record{} -> r { recComp = kit }
+        _          -> __IMPOSSIBLE__
 
 defineCompKitR ::
     QName          -- ^ some name, e.g. record name
@@ -529,8 +528,22 @@ checkRecordProjections m r hasNamedCon con tel ftel fs = do
           , "t     =" <+> prettyTCM t
           , "ftel2 =" <+> addContext ftel1 (underAbstraction_ ftel2 prettyTCM)
           , "abstr =" <+> (text . show) (Info.defAbstract info)
+          , "quant =" <+> (text . show) (getQuantity ai)
+          , "coh   =" <+> (text . show) (getCohesion ai)
           ]
         ]
+
+      -- Cohesion check:
+      -- For a field `@c π : A` we would create a projection `π : .., (@(c^-1) r : R as) -> A`
+      -- So we want to check that `@.., (c^-1 . c) x : A |- x : A` is allowed by the modalities.
+      --
+      -- Alternatively we could create a projection `.. |- π r :c A`
+      -- but that would require support for a `t :c A` judgment.
+      if hasLeftAdjoint (getCohesion ai)
+        then unless (getCohesion ai == Continuous)
+                    -- Andrea TODO: properly update the context/type of the projection when we add Sharp
+                    __IMPOSSIBLE__
+        else genericError $ "Cannot have record fields with modality " ++ show (getCohesion ai)
 
       -- Andreas, 2010-09-09 The following comments are misleading, TODO: update
       -- in fact, tel includes the variable of record type as last one
@@ -589,7 +602,7 @@ checkRecordProjections m r hasNamedCon con tel ftel fs = do
         let bodyMod = case rel of
               Relevant   -> id
               NonStrict  -> id
-              Irrelevant -> DontCare
+              Irrelevant -> dontCare
 
         let -- Andreas, 2010-09-09: comment for existing code
             -- split the telescope into parameters (ptel) and the type or the record

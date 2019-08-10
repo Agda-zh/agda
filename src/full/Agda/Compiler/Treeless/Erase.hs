@@ -1,13 +1,16 @@
 {-# LANGUAGE PatternSynonyms #-}
 
-module Agda.Compiler.Treeless.Erase (eraseTerms, computeErasedConstructorArgs) where
+module Agda.Compiler.Treeless.Erase
+       ( eraseTerms
+       , computeErasedConstructorArgs
+       , isErasable
+       ) where
 
-import Control.Arrow ((&&&), (***), first, second)
+import Control.Arrow (first, second)
 import Control.Monad
 import Control.Monad.State
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Semigroup
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal as I
@@ -20,14 +23,12 @@ import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Monad as I
 import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Telescope
-import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Datatypes
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Primitive
 
 import {-# SOURCE #-} Agda.Compiler.Backend
 import Agda.Compiler.Treeless.Subst
-import Agda.Compiler.Treeless.Pretty
 import Agda.Compiler.Treeless.Unused
 
 import Agda.Utils.Functor
@@ -36,14 +37,18 @@ import Agda.Utils.Maybe
 import Agda.Utils.Memo
 import Agda.Utils.Monad
 import Agda.Utils.Pretty (prettyShow)
-import qualified Agda.Utils.Pretty as P
 import Agda.Utils.IntSet.Infinite (IntSet)
 import qualified Agda.Utils.IntSet.Infinite as IntSet
 
 import Agda.Utils.Impossible
 
-data ESt = ESt { _funMap  :: Map QName FunInfo
-               , _typeMap :: Map QName TypeInfo }
+-- | State of the eraser.
+data ESt = ESt
+  { _funMap  :: Map QName FunInfo
+      -- ^ Memoize computed `FunInfo` for functions/constructors/... `QName`.
+  , _typeMap :: Map QName TypeInfo
+      -- ^ Memoize computed `TypeInfo` for data/record types `QName`.
+  }
 
 funMap :: Lens' (Map QName FunInfo) ESt
 funMap f r = f (_funMap r) <&> \ a -> r { _funMap = a }
@@ -51,6 +56,7 @@ funMap f r = f (_funMap r) <&> \ a -> r { _funMap = a }
 typeMap :: Lens' (Map QName TypeInfo) ESt
 typeMap f r = f (_typeMap r) <&> \ a -> r { _typeMap = a }
 
+-- | Eraser monad.
 type E = StateT ESt TCM
 
 runE :: E a -> TCM a
@@ -74,7 +80,7 @@ eraseTerms q eval t = usedArguments q t *> runE (eraseTop q t)
 
     erase t = case tAppView t of
 
-      TCon c : vs -> do
+      (TCon c, vs) -> do
         (rs, h) <- getFunInfo c
         when (length rs < length vs) __IMPOSSIBLE__
         case h of
@@ -82,7 +88,7 @@ eraseTerms q eval t = usedArguments q t *> runE (eraseTop q t)
           Empty    -> pure TErased
           _        -> tApp (TCon c) <$> zipWithM eraseRel rs vs
 
-      TDef f : vs -> do
+      (TDef f, vs) -> do
         (rs, h) <- getFunInfo f
         case h of
           Erasable -> pure TErased
@@ -127,7 +133,7 @@ eraseTerms q eval t = usedArguments q t *> runE (eraseTop q t)
     tApp f []                  = f
     tApp TErased _             = TErased
     tApp f _ | isUnreachable f = tUnreachable
-    tApp f es                  = TApp f es
+    tApp f es                  = mkTApp f es
 
     tCase x t d bs
       | isErased d && all (isErased . aBody) bs = pure TErased
@@ -222,6 +228,7 @@ type FunInfo = ([TypeInfo], TypeInfo)
 getFunInfo :: QName -> E FunInfo
 getFunInfo q = memo (funMap . key q) $ getInfo q
   where
+    getInfo :: QName -> E FunInfo
     getInfo q = do
       (rs, t) <- do
         (tel, t) <- lift $ typeWithoutParams q
@@ -241,6 +248,15 @@ getFunInfo q = memo (funMap . key q) $ getInfo q
       | not b                  = Erasable
       | Forced <- f            = Erasable
       | otherwise              = i
+
+isErasable :: QName -> TCM Bool
+isErasable qn =
+  -- The active backend should be set
+  caseMaybeM (viewTC eActiveBackendName) __IMPOSSIBLE__ $ \ bname ->
+  -- However it may not be part of the set of available backends
+  -- in which case we default to not erasable to avoid false negatives.
+  caseMaybeM (lookupBackend bname)       (pure False)   $ \ _ ->
+  erasable . snd <$> runE (getFunInfo qn)
 
 telListView :: Type -> TCM (ListTel, Type)
 telListView t = do

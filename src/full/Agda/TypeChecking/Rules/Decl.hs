@@ -5,45 +5,33 @@ module Agda.TypeChecking.Rules.Decl where
 import Prelude hiding ( null )
 
 import Control.Monad
-import Control.Monad.Reader
-import Control.Monad.State (modify, gets, get)
 import Control.Monad.Writer (tell)
 
 import Data.Either (partitionEithers)
 import qualified Data.Foldable as Fold
 import qualified Data.List as List
 import Data.Maybe
-import Data.Map (Map)
-import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.IntSet as IntSet
-import qualified Data.Map as Map
 import Data.Set (Set)
 
-import Agda.Interaction.Options
 import Agda.Interaction.Highlighting.Generate
 
 import qualified Agda.Syntax.Abstract as A
 import Agda.Syntax.Abstract.Views (deepUnscopeDecl, deepUnscopeDecls)
-import qualified Agda.Syntax.Concrete.Name as C
 import Agda.Syntax.Internal
-import qualified Agda.Syntax.Reflected as R
 import qualified Agda.Syntax.Info as Info
 import Agda.Syntax.Position
 import Agda.Syntax.Common
 import Agda.Syntax.Literal
-import Agda.Syntax.Translation.InternalToAbstract
-import Agda.Syntax.Translation.ReflectedToAbstract
 
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Builtin
 import qualified Agda.TypeChecking.Monad.Benchmark as Bench
 
-import Agda.TypeChecking.CheckInternal
 import Agda.TypeChecking.Constraints
 import Agda.TypeChecking.Conversion
 import Agda.TypeChecking.IApplyConfluence
-import Agda.TypeChecking.Errors
 import Agda.TypeChecking.Generalize
 import Agda.TypeChecking.Injectivity
 import Agda.TypeChecking.Irrelevance
@@ -53,7 +41,6 @@ import Agda.TypeChecking.Polarity
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Primitive
 import Agda.TypeChecking.ProjectionLike
-import Agda.TypeChecking.Quote
 import Agda.TypeChecking.Unquote
 import Agda.TypeChecking.Records
 import Agda.TypeChecking.RecordPatterns
@@ -74,10 +61,7 @@ import Agda.TypeChecking.Rules.Display ( checkDisplayPragma )
 
 import Agda.Termination.TermCheck
 
-import Agda.Utils.Except
 import Agda.Utils.Functor
-import Agda.Utils.Function
-import qualified Agda.Utils.HashMap as HMap
 import Agda.Utils.Lens
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
@@ -190,7 +174,7 @@ checkDecl d = setCurrentRange d $ do
                                     verboseS "tc.decl.mutual" 70 $ do
                                       current <- asksTC envMutualBlock
                                       unless (Just blockId == current) $ do
-                                        reportSLn "" 0 $ unlines
+                                        reportS "" 0
                                           [ "mutual block id discrepancy for " ++ prettyShow x
                                           , "  current    mut. bl. = " ++ show current
                                           , "  calculated mut. bl. = " ++ show blockId
@@ -267,7 +251,8 @@ mutualChecks mi d ds mid names = do
     checkPositivity_ mi names
   -- Andreas, 2013-02-27: check termination before injectivity,
   -- to avoid making the injectivity checker loop.
-  localTC (\ e -> e { envMutualBlock = Just mid }) $ checkTermination_ d
+  localTC (\ e -> e { envMutualBlock = Just mid }) $
+    checkTermination_ d
   revisitRecordPatternTranslation nameList -- Andreas, 2016-11-19 issue #2308
 
   mapM_ checkIApplyConfluence_ nameList
@@ -277,14 +262,21 @@ mutualChecks mi d ds mid names = do
   -- actual problem, and prevents interesting sound applications
   -- of sized types.
   -- checkCoinductiveRecords  ds
-  -- Andreas, 2012-09-11:  Injectivity check stores clauses
-  -- whose 'Relevance' is affected by polarity computation,
-  -- so do it here (again).
-  -- Andreas, 2015-07-01:  In particular, 'UnusedArg's of local functions
-  -- are only recognized after the polarity computation.
-  -- See Issue 1366 for an example where injectivity of a local function
-  -- is used to solve metas.  It fails if we do injectivity analysis
-  -- before polarity only.
+
+  -- Andreas, 2019-07-11: The following remarks about injectivity
+  -- and polarity seem outdated, since the UnusedArg Relevance has
+  -- been removed.
+  -- -- Andreas, 2012-09-11:  Injectivity check stores clauses
+  -- -- whose 'Relevance' is affected by polarity computation,
+  -- -- so do it here (again).
+  -- -- Andreas, 2015-07-01:  In particular, 'UnusedArg's of local functions
+  -- -- are only recognized after the polarity computation.
+  -- -- See Issue 1366 for an example where injectivity of a local function
+  -- -- is used to solve metas.  It fails if we do injectivity analysis
+  -- -- before polarity only.
+  -- However, we need to repeat injectivity checking after termination checking,
+  -- since more reductions are available after termination checking, thus,
+  -- more instances of injectivity can be recognized.
   checkInjectivity_        names
   checkProjectionLikeness_ names
 
@@ -563,9 +555,18 @@ checkAxiom' gentel funSig i info0 mp x e = whenAbstractFreezeMetasAfter i $ do
 
   -- Andreas, 2012-04-18  if we are in irrelevant context, axioms is irrelevant
   -- even if not declared as such (Issue 610).
-  rel <- max (getRelevance info0) <$> asksTC envRelevance
-  let info = setRelevance rel info0
-  -- rel <- ifM ((Irrelevant ==) <$> asksTC envRelevance) (return Irrelevant) (return rel0)
+  -- Andreas, 2019-06-17  also for erasure (issue #3855).
+  rel <- max (getRelevance info0) <$> asksTC getRelevance
+  q   <- asksTC getQuantity <&> \case
+    q@Quantity0{} -> q
+    _ -> getQuantity info0
+
+  -- Andrea, 2019-07-16 Cohesion is purely based on left-division, it
+  -- does not take envModality into account.
+  let c = getCohesion info0
+  let mod  = Modality rel q c
+  let info = setModality mod info0
+  applyCohesionToContext c $ do
   (genParams, npars, t) <- workOnTypes $ case gentel of
         Nothing     -> ([], 0,) <$> isType_ e
         Just gentel ->
@@ -575,7 +576,7 @@ checkAxiom' gentel funSig i info0 mp x e = whenAbstractFreezeMetasAfter i $ do
 
   reportSDoc "tc.decl.ax" 10 $ sep
     [ text $ "checked type signature"
-    , nest 2 $ (prettyTCM rel <> prettyTCM x) <+> ":" <+> prettyTCM t
+    , nest 2 $ (prettyTCM mod <> prettyTCM x) <+> ":" <+> prettyTCM t
     , nest 2 $ "of sort " <+> prettyTCM (getSort t)
     ]
 
@@ -654,7 +655,7 @@ checkPrimitive i x e =
           , "primLevelMax"
           , "primSetOmega"
           ]
-    when (elem name builtinPrimitives) $ typeError $ NoSuchPrimitiveFunction name
+    when (name `elem` builtinPrimitives) $ typeError $ NoSuchPrimitiveFunction name
     t <- isType_ e
     noConstraints $ equalType t t'
     let s  = prettyShow $ qnameName x
@@ -777,11 +778,12 @@ checkModuleArity m tel args = check tel args
   where
     bad = typeError $ ModuleArityMismatch m tel args
 
+    check :: Telescope -> [NamedArg A.Expr] -> TCM Telescope
     check tel []             = return tel
     check EmptyTel (_:_)     = bad
-    check (ExtendTel dom@Dom{domInfo = info} btel) args0@(Arg info' (Named rname _) : args) =
-      let name = fmap rangedThing rname
-          my   = fmap rangedThing $ domName dom
+    check (ExtendTel dom@Dom{domInfo = info} btel) args0@(Arg info' arg : args) =
+      let name = bareNameOf arg
+          my   = bareNameOf dom
           tel  = absBody btel in
       case (argInfoHiding info, argInfoHiding info', name) of
         (Instance{}, NotHidden, _)        -> check tel args0
@@ -904,7 +906,7 @@ checkSectionApplication' i m1 (A.RecordModuleInstance x) copyInfo = do
       -- Found last parameter: switch it to @Instance@.
       instFinal (ExtendTel dom (Abs n EmptyTel)) =
                  ExtendTel do' (Abs n EmptyTel)
-        where do' = makeInstance dom { domName = Just $ unranged "r" }
+        where do' = makeInstance dom { domName = Just $ WithOrigin Inserted $ unranged "r" }
       -- Otherwise, keep searchinf for last parameter:
       instFinal (ExtendTel arg (Abs n tel)) =
                  ExtendTel arg (Abs n (instFinal tel))

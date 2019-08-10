@@ -4,23 +4,19 @@ module Agda.TypeChecking.Rules.Def where
 
 import Prelude hiding ( mapM, null )
 
-import Control.Arrow ((***),first,second)
+import Control.Arrow (first,second)
 import Control.Monad.State hiding (forM, mapM)
-import Control.Monad.Reader hiding (forM, mapM)
 
 import Data.Function
 import qualified Data.List as List
 import Data.Maybe
-import Data.Traversable (Traversable, traverse, forM, mapM)
-import qualified Data.Map as Map
-import qualified Data.Set as Set
+import Data.Traversable (forM, mapM)
 import Data.Semigroup (Semigroup((<>)))
 
 import Agda.Interaction.Options
 
 import Agda.Syntax.Common
 import qualified Agda.Syntax.Concrete as C
-import Agda.Syntax.Concrete (exprFieldA)
 import Agda.Syntax.Position
 import Agda.Syntax.Abstract.Pattern as A
 import qualified Agda.Syntax.Abstract as A
@@ -29,7 +25,6 @@ import Agda.Syntax.Internal as I
 import Agda.Syntax.Internal.Pattern as I
 import qualified Agda.Syntax.Info as Info
 import Agda.Syntax.Fixity
-import Agda.Syntax.Translation.InternalToAbstract
 import Agda.Syntax.Info
 
 import Agda.TypeChecking.Monad
@@ -41,21 +36,16 @@ import Agda.TypeChecking.Constraints
 import Agda.TypeChecking.Conversion
 import Agda.TypeChecking.Coverage.SplitTree
 import Agda.TypeChecking.Inlining
-import Agda.TypeChecking.MetaVars
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Patterns.Abstract (expandPatternSynonyms)
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Substitute
-import Agda.TypeChecking.Free
 import Agda.TypeChecking.CheckInternal
 import Agda.TypeChecking.With
 import Agda.TypeChecking.Telescope
 import Agda.TypeChecking.Injectivity
 import Agda.TypeChecking.Irrelevance
 import Agda.TypeChecking.SizedTypes.Solve
-import Agda.TypeChecking.RecordPatterns
-import Agda.TypeChecking.Records
-import Agda.TypeChecking.Rewriting.Clause
 import Agda.TypeChecking.Rewriting.Confluence
 import Agda.TypeChecking.CompiledClause (CompiledClauses'(..), hasProjectionPatterns)
 import Agda.TypeChecking.CompiledClause.Compile
@@ -63,10 +53,9 @@ import Agda.TypeChecking.Primitive hiding (Nat)
 
 import Agda.TypeChecking.Rules.Term
 import Agda.TypeChecking.Rules.LHS                 ( checkLeftHandSide, LHSResult(..), bindAsPatterns )
-import Agda.TypeChecking.Rules.LHS.Problem         ( AsBinding(..) )
 import {-# SOURCE #-} Agda.TypeChecking.Rules.Decl ( checkDecls )
 
-import Agda.Utils.Except ( MonadError(catchError, throwError) )
+import Agda.Utils.Except ( MonadError(catchError) )
 import Agda.Utils.Functor
 import Agda.Utils.Lens
 import Agda.Utils.List
@@ -87,8 +76,9 @@ import Agda.Utils.Impossible
 checkFunDef :: Delayed -> Info.DefInfo -> QName -> [A.Clause] -> TCM ()
 checkFunDef delayed i name cs = do
         -- Get the type and relevance of the function
-        t    <- typeOfConst name
-        info  <- flip setRelevance defaultArgInfo <$> relOfConst name
+        def <- instantiateDef =<< getConstInfo name
+        let t    = defType def
+        let info = getArgInfo def
         case isAlias cs t of
           Just (e, mc, x) ->
             traceCall (CheckFunDefCall (getRange i) name cs) $ do
@@ -100,7 +90,7 @@ checkFunDef delayed i name cs = do
           _ -> checkFunDef' t info delayed Nothing Nothing i name cs
 
         -- If it's a macro check that it ends in Term → TC ⊤
-        ismacro <- isMacro . theDef <$> getConstInfo name
+        let ismacro = isMacro . theDef $ def
         when (ismacro || Info.defMacro i == MacroDef) $ checkMacroType t
     `catchIlltypedPatternBlockedOnMeta` \ (err, x) -> do
         reportSDoc "tc.def" 20 $ vcat $
@@ -290,6 +280,8 @@ checkFunDefS t ai delayed extlam with i name withSub cs = do
               , nest 2 $ sep $ map (text . show . QNamed name) cs
               ]
 
+        -- Needed to calculate the proper fullType below.
+        applyCohesionToContext ai $ do
 
         -- Systems have their own coverage and "coherence" check, we
         -- also add an absurd clause for the cases not needed.
@@ -320,7 +312,7 @@ checkFunDefS t ai delayed extlam with i name withSub cs = do
         -- Check if the function is injective.
         -- Andreas, 2015-07-01 we do it here in order to resolve metas
         -- in mutual definitions, e.g. the U/El definition in succeed/Issue439.agda
-        -- We do it again for the mutual block after polarity analysis, see Rules.Decl.
+        -- We do it again for the mutual block after termination checking, see Rules.Decl.
         reportSLn "tc.inj.def" 20 $ "checkFunDef': checking injectivity..."
         inv <- Bench.billTo [Bench.Injectivity] $
           checkInjectivity name cs
@@ -406,7 +398,7 @@ useTerPragma def@Defn{ defName = name, theDef = fun@Function{}} = do
         NonTerminating -> Just False
         Terminating    -> Just True
         _              -> Nothing
-  reportSLn "tc.fundef" 30 $ unlines $
+  reportS "tc.fundef" 30 $
     [ "funTerminates of " ++ prettyShow name ++ " set to " ++ show terminates
     , "  tc = " ++ show tc
     ]
@@ -582,7 +574,7 @@ checkClause
   -> A.SpineClause -- ^ Clause.
   -> TCM (Clause,ClausesPostChecks)  -- ^ Type-checked clause
 
-checkClause t withSub c@(A.Clause (A.SpineLHS i x aps) strippedPats rhs0 wh catchall) = do
+checkClause t withSub c@(A.Clause lhs@(A.SpineLHS i x aps) strippedPats rhs0 wh catchall) = do
     reportSDoc "tc.lhs.top" 30 $ "Checking clause" $$ prettyA c
     unlessNull (trailingWithPatterns aps) $ \ withPats -> do
       typeError $ UnexpectedWithPatterns $ map namedArg withPats
@@ -592,7 +584,7 @@ checkClause t withSub c@(A.Clause (A.SpineLHS i x aps) strippedPats rhs0 wh catc
       when (not $ null strippedPats) $ reportSDoc "tc.lhs.top" 50 $
         "strippedPats:" <+> vcat [ prettyA p <+> "=" <+> prettyTCM v <+> ":" <+> prettyTCM a | A.ProblemEq p v a <- strippedPats ]
       closed_t <- flip abstract t <$> getContextTelescope
-      checkLeftHandSide (CheckPatternShadowing c) (Just x) aps t withSub strippedPats $ \ lhsResult@(LHSResult npars delta ps absurdPat trhs patSubst asb psplit) -> do
+      checkLeftHandSide (CheckLHS lhs) (Just x) aps t withSub strippedPats $ \ lhsResult@(LHSResult npars delta ps absurdPat trhs patSubst asb psplit) -> do
         -- Note that we might now be in irrelevant context,
         -- in case checkLeftHandSide walked over an irrelevant projection pattern.
 
@@ -670,7 +662,7 @@ checkClause t withSub c@(A.Clause (A.SpineLHS i x aps) strippedPats rhs0 wh catc
                              ConP _ _ ps -> iApplyVars ps
 
         -- compute body modification for irrelevant definitions, see issue 610
-        rel <- asksTC envRelevance
+        rel <- asksTC getRelevance
         let bodyMod body = case rel of
               Irrelevant -> dontCare <$> body
               _          -> body
@@ -701,144 +693,204 @@ checkRHS
   -> A.RHS                   -- ^ Rhs to check.
   -> TCM (Maybe Term, WithFunctionProblem)
                                               -- Note: the as-bindings are already bound (in checkClause)
-checkRHS i x aps t lhsResult@(LHSResult _ delta ps absurdPat trhs _ _asb _) rhs0 = handleRHS rhs0
-  where
-  handleRHS rhs =
-    case rhs of
+checkRHS i x aps t lhsResult@(LHSResult _ delta ps absurdPat trhs _ _asb _) rhs0 =
+  handleRHS rhs0 where
 
-      -- Case: ordinary RHS
-      A.RHS e _ -> Bench.billTo [Bench.Typing, Bench.CheckRHS] $ do
-        -- If there is an absurd pattern, we do not need a RHS. If we have
-        -- one we complain, ignore it and return the same @(Nothing, NoWithFunction)@
-        -- as the case dealing with @A.AbsurdRHS@.
-        mv <- if absurdPat
-              then Nothing <$ setCurrentRange rhs (warning $ AbsurdPatternRequiresNoRHS ps)
-              else Just <$> checkExpr e (unArg trhs)
-        return (mv, NoWithFunction)
+  handleRHS :: A.RHS -> TCM (Maybe Term, WithFunctionProblem)
+  handleRHS rhs = case rhs of
+    A.RHS e _                  -> ordinaryRHS e
+    A.AbsurdRHS                -> noRHS
+    A.RewriteRHS eqs ps rhs wh -> rewriteEqnsRHS eqs ps rhs wh
+    A.WithRHS aux es cs        -> withRHS aux es cs
 
-      -- Case: no RHS
-      A.AbsurdRHS -> do
-        unless absurdPat $ typeError $ NoRHSRequiresAbsurdPattern aps
-        return (Nothing, NoWithFunction)
+  -- Ordinary case: f xs = e
+  ordinaryRHS :: A.Expr -> TCM (Maybe Term, WithFunctionProblem)
+  ordinaryRHS e = Bench.billTo [Bench.Typing, Bench.CheckRHS] $ do
+    -- If there is an absurd pattern, we do not need a RHS. If we have
+    -- one we complain, ignore it and return the same @(Nothing, NoWithFunction)@
+    -- as the case dealing with @A.AbsurdRHS@.
+    mv <- if absurdPat
+          then Nothing <$ setCurrentRange e (warning $ AbsurdPatternRequiresNoRHS ps)
+          else Just <$> checkExpr e (unArg trhs)
+    return (mv, NoWithFunction)
 
+  -- Absurd case: no right hand side
+  noRHS :: TCM (Maybe Term, WithFunctionProblem)
+  noRHS = do
+    unless absurdPat $ typeError $ NoRHSRequiresAbsurdPattern aps
+    return (Nothing, NoWithFunction)
+
+
+  -- With case: @f xs with a | b | c | ...; ... | ps1 = rhs1; ... | ps2 = rhs2; ...@
+  -- This is mostly a wrapper around @checkWithRHS@
+  withRHS :: QName       -- ^ name of the with-function
+          -> [A.Expr]    -- ^ @[a, b, c, ...]@
+          -> [A.Clause]  -- ^ @[(ps1 = rhs1), (ps2 = rhs), ...]@
+          -> TCM (Maybe Term, WithFunctionProblem)
+  withRHS aux es cs = do
+
+    reportSDoc "tc.with.top" 15 $ vcat
+      [ "TC.Rules.Def.checkclause reached A.WithRHS"
+      , sep $ prettyA aux : map (parens . prettyA) es
+      ]
+    reportSDoc "tc.with.top" 20 $ do
+      nfv <- getCurrentModuleFreeVars
+      m   <- currentModule
+      sep [ "with function module:" <+>
+             prettyList (map prettyTCM $ mnameToList m)
+          ,  text $ "free variables: " ++ show nfv
+          ]
+
+    -- Infer the types of the with expressions
+    (vs0, as) <- unzip <$> mapM inferExprForWith es
+
+    -- Andreas, 2016-01-23, Issue #1796
+    -- Run the size constraint solver to improve with-abstraction
+    -- in case the with-expression contains size metas.
+    solveSizeConstraints DefaultToInfty
+
+    checkWithRHS x aux t lhsResult vs0 (map OtherType as) cs
+
+  -- Rewrite case: f xs (rewrite / invert) a | b | c | ...
+  rewriteEqnsRHS :: [A.RewriteEqn] -> [A.ProblemEq] -> A.RHS -> A.WhereDeclarations -> TCM (Maybe Term, WithFunctionProblem)
+  rewriteEqnsRHS [] strippedPats rhs wh = checkWhere wh $ handleRHS rhs
       -- Case: @rewrite@
       -- Andreas, 2014-01-17, Issue 1402:
       -- If the rewrites are discarded since lhs=rhs, then
       -- we can actually have where clauses.
-      A.RewriteRHS [] strippedPats rhs wh -> checkWhere wh $ handleRHS rhs
-      A.RewriteRHS ((qname,eq):qes) strippedPats rhs wh -> do
+  rewriteEqnsRHS (r:rs) strippedPats rhs wh = case r of
+    Rewrite ((qname, eq) : qes) ->
+      rewriteEqnRHS qname eq (case qes of { [] -> rs; _ -> Rewrite qes : rs })
+    Invert ((pat, (qname, expr)) : pqes) ->
+      invertEqnRHS qname pat expr (case pqes of { [] -> rs; _ -> Invert pqes : rs })
+    -- Invariant: these lists are non-empty
+    Rewrite [] -> __IMPOSSIBLE__
+    Invert [] -> __IMPOSSIBLE__
 
-        -- Action for skipping this rewrite.
-        -- We do not want to create unsolved metas in case of
-        -- a futile rewrite with a reflexive equation.
-        -- Thus, we restore the state in this case,
-        -- unless the rewrite expression contains questionmarks.
-        st <- getTC
-        let recurse = do
-             st' <- getTC
-             -- Comparing the whole stInteractionPoints maps is a bit
-             -- wasteful, but we assume
-             -- 1. rewriting with a reflexive equality to happen rarely,
-             -- 2. especially with ?-holes in the rewrite expression
-             -- 3. and a large overall number of ?s.
-             let sameIP = (==) `on` (^.stInteractionPoints)
-             when (sameIP st st') $ putTC st
-             handleRHS $ A.RewriteRHS qes strippedPats rhs wh
+    where
 
-        -- Get value and type of rewrite-expression.
+    -- @invert@ clauses
+    invertEqnRHS :: QName -> A.Pattern -> A.Expr
+                 -> [A.RewriteEqn] -> TCM (Maybe Term, WithFunctionProblem)
+    invertEqnRHS qname pat expr rs = do
 
-        (proof, eqt) <- inferExpr eq
+      (withExpr, ty) <- inferExpr expr
+      let pats     = [pat]
+      let withType = OtherType ty
 
-        -- Andreas, 2016-04-14, see also Issue #1796
-        -- Run the size constraint solver to improve with-abstraction
-        -- in case the with-expression contains size metas.
-        solveSizeConstraints DefaultToInfty
+      -- Andreas, 2016-04-14, see also Issue #1796
+      -- Run the size constraint solver to improve with-abstraction
+      -- in case the with-expression contains size metas.
+      solveSizeConstraints DefaultToInfty
 
-        -- Check that the type is actually an equality (lhs ≡ rhs)
-        -- and extract lhs, rhs, and their type.
+      let rhs' = insertPatterns pats rhs
+          (rhs'', outerWhere) -- the where clauses should go on the inner-most with
+            | null rs  = (rhs', wh)
+            | otherwise = (A.RewriteRHS rs strippedPats rhs' wh, A.noWhereDecls)
+          -- Andreas, 2014-03-05 kill range of copied patterns
+          -- since they really do not have a source location.
+          cl = A.Clause (A.LHS i $ insertPatternsLHSCore pats $ A.LHSHead x $ killRange aps)
+                 strippedPats rhs'' outerWhere False
 
-        t' <- reduce =<< instantiateFull eqt
-        (eqt,rewriteType,rewriteFrom,rewriteTo) <- equalityView t' >>= \case
-          eqt@(EqualityType _s _eq _params (Arg _ dom) a b) -> do
-            s <- inferSort dom
-            return (eqt, El s dom, unArg a, unArg b)
-            -- Note: the sort _s of the equality need not be the sort of the type @dom@!
-          OtherType{} -> typeError . GenericDocError =<< do
-            "Cannot rewrite by equation of type" <+> prettyTCM t'
+      reportSDoc "tc.invert" 60 $ vcat
+        [ text "invert"
+        , "  rhs' = " <> (text . show) rhs'
+        ]
+      checkWithRHS x qname t lhsResult [withExpr] [withType] [cl]
 
-        -- Get the name of builtin REFL.
+    -- @rewrite@ clauses
+    rewriteEqnRHS :: QName -> A.Expr
+                  -> [A.RewriteEqn] -> TCM (Maybe Term, WithFunctionProblem)
+    rewriteEqnRHS qname eq rs = do
 
-        Con reflCon _ [] <- primRefl
-        reflInfo <- fmap (setOrigin Inserted) <$> getReflArgInfo reflCon
+      -- Action for skipping this rewrite.
+      -- We do not want to create unsolved metas in case of
+      -- a futile rewrite with a reflexive equation.
+      -- Thus, we restore the state in this case,
+      -- unless the rewrite expression contains questionmarks.
+      st <- getTC
+      let recurse = do
+           st' <- getTC
+           -- Comparing the whole stInteractionPoints maps is a bit
+           -- wasteful, but we assume
+           -- 1. rewriting with a reflexive equality to happen rarely,
+           -- 2. especially with ?-holes in the rewrite expression
+           -- 3. and a large overall number of ?s.
+           let sameIP = (==) `on` (^.stInteractionPoints)
+           when (sameIP st st') $ putTC st
+           handleRHS $ A.RewriteRHS rs strippedPats rhs wh
 
-        -- Andreas, 2017-01-11:
-        -- The test for refl is obsolete after fixes of #520 and #1740.
-        -- -- Andreas, 2014-05-17  Issue 1110:
-        -- -- Rewriting with @refl@ has no effect, but gives an
-        -- -- incomprehensible error message about the generated
-        -- -- with clause. Thus, we rather do simply nothing if
-        -- -- rewriting with @refl@ is attempted.
-        -- let isReflProof = do
-        --      v <- reduce proof
-        --      case v of
-        --        Con c _ [] | c == reflCon -> return True
-        --        _ -> return False
-        -- ifM isReflProof recurse $ {- else -} do
+      -- Get value and type of rewrite-expression.
 
-        -- Process 'rewrite' clause like a suitable 'with' clause.
+      (proof, eqt) <- inferExpr eq
 
-        -- The REFL constructor might have an argument
-        let reflPat  = A.ConP (ConPatInfo ConOCon patNoRange ConPatEager) (unambiguous $ conName reflCon) $
-              maybeToList $ fmap (\ ai -> Arg ai $ unnamed $ A.WildP patNoRange) reflInfo
+      -- Andreas, 2016-04-14, see also Issue #1796
+      -- Run the size constraint solver to improve with-abstraction
+      -- in case the with-expression contains size metas.
+      solveSizeConstraints DefaultToInfty
 
-        -- Andreas, 2015-12-25  Issue #1740:
-        -- After the fix of #520, rewriting with a reflexive equation
-        -- has to be desugared as matching against refl.
-        let isReflexive = tryConversion $ dontAssignMetas $
-             equalTerm rewriteType rewriteFrom rewriteTo
+      -- Check that the type is actually an equality (lhs ≡ rhs)
+      -- and extract lhs, rhs, and their type.
 
-        (pats, withExpr, withType) <- do
-          ifM isReflexive
-            {-then-} (return ([ reflPat ], proof, OtherType t'))
-            {-else-} (return ([ A.WildP patNoRange, reflPat ], proof, eqt))
+      t' <- reduce =<< instantiateFull eqt
+      (eqt,rewriteType,rewriteFrom,rewriteTo) <- equalityView t' >>= \case
+        eqt@(EqualityType _s _eq _params (Arg _ dom) a b) -> do
+          s <- inferSort dom
+          return (eqt, El s dom, unArg a, unArg b)
+          -- Note: the sort _s of the equality need not be the sort of the type @dom@!
+        OtherType{} -> typeError . GenericDocError =<< do
+          "Cannot rewrite by equation of type" <+> prettyTCM t'
 
-        let rhs'     = insertPatterns pats rhs
-            (rhs'', outerWhere) -- the where clauses should go on the inner-most with
-              | null qes  = (rhs', wh)
-              | otherwise = (A.RewriteRHS qes strippedPats rhs' wh, A.noWhereDecls)
-            -- Andreas, 2014-03-05 kill range of copied patterns
-            -- since they really do not have a source location.
-            cl = A.Clause (A.LHS i $ insertPatternsLHSCore pats $ A.LHSHead x $ killRange aps)
-                   strippedPats rhs'' outerWhere False
-        reportSDoc "tc.rewrite" 60 $ vcat
-          [ "rewrite"
-          , "  rhs' = " <> (text . show) rhs'
-          ]
-        checkWithRHS x qname t lhsResult [withExpr] [withType] [cl]
+      -- Get the name of builtin REFL.
 
-      -- Case: @with@
-      A.WithRHS aux es cs -> do
-        reportSDoc "tc.with.top" 15 $ vcat
-          [ "TC.Rules.Def.checkclause reached A.WithRHS"
-          , sep $ prettyA aux : map (parens . prettyA) es
-          ]
-        reportSDoc "tc.with.top" 20 $ do
-          nfv <- getCurrentModuleFreeVars
-          m   <- currentModule
-          sep [ "with function module:" <+>
-                prettyList (map prettyTCM $ mnameToList m)
-              ,  text $ "free variables: " ++ show nfv
-              ]
+      Con reflCon _ [] <- primRefl
+      reflInfo <- fmap (setOrigin Inserted) <$> getReflArgInfo reflCon
 
-        -- Infer the types of the with expressions
-        (vs0, as) <- unzip <$> mapM inferExprForWith es
+      -- Andreas, 2017-01-11:
+      -- The test for refl is obsolete after fixes of #520 and #1740.
+      -- -- Andreas, 2014-05-17  Issue 1110:
+      -- -- Rewriting with @refl@ has no effect, but gives an
+      -- -- incomprehensible error message about the generated
+      -- -- with clause. Thus, we rather do simply nothing if
+      -- -- rewriting with @refl@ is attempted.
+      -- let isReflProof = do
+      --      v <- reduce proof
+      --      case v of
+      --        Con c _ [] | c == reflCon -> return True
+      --        _ -> return False
+      -- ifM isReflProof recurse $ {- else -} do
 
-        -- Andreas, 2016-01-23, Issue #1796
-        -- Run the size constraint solver to improve with-abstraction
-        -- in case the with-expression contains size metas.
-        solveSizeConstraints DefaultToInfty
+      -- Process 'rewrite' clause like a suitable 'with' clause.
 
-        checkWithRHS x aux t lhsResult vs0 (map OtherType as) cs
+      -- The REFL constructor might have an argument
+      let reflPat  = A.ConP (ConPatInfo ConOCon patNoRange ConPatEager) (unambiguous $ conName reflCon) $
+            maybeToList $ fmap (\ ai -> Arg ai $ unnamed $ A.WildP patNoRange) reflInfo
+
+      -- Andreas, 2015-12-25  Issue #1740:
+      -- After the fix of #520, rewriting with a reflexive equation
+      -- has to be desugared as matching against refl.
+      let isReflexive = tryConversion $ dontAssignMetas $
+           equalTerm rewriteType rewriteFrom rewriteTo
+
+      (pats, withExpr, withType) <- do
+        ifM isReflexive
+          {-then-} (return ([ reflPat ], proof, OtherType t'))
+          {-else-} (return ([ A.WildP patNoRange, reflPat ], proof, eqt))
+
+      let rhs' = insertPatterns pats rhs
+          (rhs'', outerWhere) -- the where clauses should go on the inner-most with
+            | null rs  = (rhs', wh)
+            | otherwise = (A.RewriteRHS rs strippedPats rhs' wh, A.noWhereDecls)
+          -- Andreas, 2014-03-05 kill range of copied patterns
+          -- since they really do not have a source location.
+          cl = A.Clause (A.LHS i $ insertPatternsLHSCore pats $ A.LHSHead x $ killRange aps)
+                 strippedPats rhs'' outerWhere False
+
+      reportSDoc "tc.rewrite" 60 $ vcat
+        [ text "rewrite"
+        , "  rhs' = " <> (text . show) rhs'
+        ]
+      checkWithRHS x qname t lhsResult [withExpr] [withType] [cl]
 
 checkWithRHS
   :: QName                   -- ^ Name of function.
@@ -850,7 +902,8 @@ checkWithRHS
   -> [A.Clause]              -- ^ With-clauses to check.
   -> TCM (Maybe Term, WithFunctionProblem)
                                 -- Note: as-bindings already bound (in checkClause)
-checkWithRHS x aux t (LHSResult npars delta ps _absurdPat trhs _ _asb _) vs0 as cs = Bench.billTo [Bench.Typing, Bench.With] $ do
+checkWithRHS x aux t (LHSResult npars delta ps _absurdPat trhs _ _asb _) vs0 as cs =
+  Bench.billTo [Bench.Typing, Bench.With] $ do
         let withArgs = withArguments vs0 as
             perm = fromMaybe __IMPOSSIBLE__ $ dbPatPerm ps
         (vs, as)  <- normalise (vs0, as)

@@ -23,35 +23,26 @@ module Agda.TypeChecking.Rewriting.NonLinMatch where
 
 import Prelude hiding (null, sequence)
 
-import Control.Arrow (first, second)
 import Control.Monad.State
 
-import Debug.Trace
-import System.IO.Unsafe
-
 import Data.Maybe
-import Data.Monoid
-import Data.Traversable (Traversable,traverse)
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
-import qualified Data.Set as Set
-import Data.Set (Set)
 
 import Agda.Syntax.Common
-import qualified Agda.Syntax.Common as C
 import Agda.Syntax.Internal
+import Agda.Syntax.Internal.MetaVars
 
 import Agda.TypeChecking.Conversion.Pure
 import Agda.TypeChecking.Datatypes
-import Agda.TypeChecking.EtaContract
 import Agda.TypeChecking.Free
 import Agda.TypeChecking.Free.Reduce
 import Agda.TypeChecking.Irrelevance (workOnTypes)
 import Agda.TypeChecking.Level
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin (HasBuiltins(..), getBuiltin', builtinLevel, primLevelSuc, primLevelMax)
+import Agda.TypeChecking.Monad.Builtin (HasBuiltins(..), getBuiltin', builtinLevel)
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Records
 import Agda.TypeChecking.Reduce
@@ -68,7 +59,6 @@ import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Null
 import Agda.Utils.Permutation
-import Agda.Utils.Singleton
 import Agda.Utils.Size
 
 import Agda.Utils.Impossible
@@ -181,16 +171,33 @@ instance Match t a b => Match t (Dom a) (Dom b) where
   match r gamma k t p v = match r gamma k t (unDom p) (unDom v)
 
 instance Match () NLPType Type where
-  match r gamma k _ (NLPType lp p) (El s a) = workOnTypes $ do
-    match r gamma k () lp s
+  match r gamma k _ (NLPType sp p) (El s a) = workOnTypes $ do
+    match r gamma k () sp s
     match r gamma k (sort s) p a
 
--- We mine sort annotations for solutions to pattern variables of type
--- Level, but a wrong sort can never block reduction.
-instance Match () NLPat Sort where
-  match r gamma k _ p s = case s of
-    Type l -> match Irrelevant gamma k () p l
-    _      -> return ()
+instance Match () NLPSort Sort where
+  match r gamma k _ p s = do
+    bs <- reduceB s
+    let b = void bs
+        s = ignoreBlocking bs
+        yes = return ()
+        no  = matchingBlocked $ NotBlocked ReallyNotBlocked ()
+    traceSDoc "rewriting.match" 30 (sep
+      [ "matching pattern " <+> addContext (gamma `abstract` k) (prettyTCM p)
+      , "  with sort      " <+> addContext k (prettyTCM s) ]) $ do
+    case (p , s) of
+      (PType lp  , Type l  ) -> match r gamma k () lp l
+      (PProp lp  , Prop l  ) -> match r gamma k () lp l
+      (PInf      , Inf     ) -> yes
+      (PSizeUniv , SizeUniv) -> yes
+
+      -- blocked cases
+      (_ , UnivSort{}) -> matchingBlocked b
+      (_ , PiSort{}  ) -> matchingBlocked b
+      (_ , MetaS m _ ) -> matchingBlocked $ Blocked m ()
+
+      -- all other cases do not match
+      (_ , _) -> no
 
 instance Match () NLPat Level where
   match r gamma k _ p l = do
@@ -334,7 +341,7 @@ reallyFree xs v = do
     MaybeFree ms
       | null ms   -> return $ Right Nothing
       | otherwise -> return $ Left $
-        Set.foldr (\m -> mappend $ Blocked m ()) (notBlocked ()) ms
+        foldrMetaSet (\ m -> mappend $ Blocked m ()) (notBlocked ()) ms
     NotFree -> return $ Right (Just v')
 
   where

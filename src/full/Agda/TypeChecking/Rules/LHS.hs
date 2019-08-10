@@ -15,14 +15,13 @@ import Data.Maybe
 import Control.Arrow (left)
 import Control.Monad
 import Control.Monad.Reader
-import Control.Monad.State
 import Control.Monad.Writer hiding ((<>))
 import Control.Monad.Trans.Maybe
 
 import Data.Either (partitionEithers)
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
-import Data.List (delete, sortBy, stripPrefix, (\\), findIndex)
+import Data.List (findIndex)
 import qualified Data.List as List
 import Data.Monoid ( Monoid, mempty, mappend )
 import Data.Semigroup ( Semigroup )
@@ -39,7 +38,7 @@ import Agda.Syntax.Internal.Pattern
 import Agda.Syntax.Abstract (IsProjP(..))
 import qualified Agda.Syntax.Abstract as A
 import Agda.Syntax.Abstract.Views (asView, deepUnscope)
-import Agda.Syntax.Concrete (FieldAssignment'(..),NameInScope(..),LensInScope(..))
+import Agda.Syntax.Concrete (FieldAssignment'(..),LensInScope(..))
 import Agda.Syntax.Common as Common
 import Agda.Syntax.Info as A
 import Agda.Syntax.Literal
@@ -90,13 +89,13 @@ import Agda.Utils.Singleton
 import Agda.Utils.Size
 
 import Agda.Utils.Impossible
-
--- | Compute the set of flexible patterns in a list of patterns. The result is
---   the deBruijn indices of the flexible patterns.
-flexiblePatterns :: [NamedArg A.Pattern] -> TCM FlexibleVars
-flexiblePatterns nps = do
-  forMaybeM (zip (downFrom $ length nps) nps) $ \ (i, Arg ai p) -> do
-    runMaybeT $ (\ f -> FlexibleVar (getHiding ai) (getOrigin ai) f (Just i) i) <$> maybeFlexiblePattern p
+--UNUSED Liang-Ting Chen 2019-07-16
+---- | Compute the set of flexible patterns in a list of patterns. The result is
+----   the deBruijn indices of the flexible patterns.
+--flexiblePatterns :: [NamedArg A.Pattern] -> TCM FlexibleVars
+--flexiblePatterns nps = do
+--  forMaybeM (zip (downFrom $ length nps) nps) $ \ (i, Arg ai p) -> do
+--    runMaybeT $ (\ f -> FlexibleVar (getHiding ai) (getOrigin ai) f (Just i) i) <$> maybeFlexiblePattern p
 
 -- | A pattern is flexible if it is dotted or implicit, or a record pattern
 --   with only flexible subpatterns.
@@ -302,13 +301,9 @@ problemAllVariables problem =
 --
 -- Precondition: The problem has to be solved.
 
-noShadowingOfConstructors
-  :: Call -- ^ Trace, e.g., @CheckPatternShadowing clause@
-  -> [ProblemEq] -> TCM ()
-noShadowingOfConstructors mkCall eqs =
-  traceCall mkCall $ mapM_ noShadowing eqs
-  where
-  noShadowing (ProblemEq p _ (Dom{domInfo = info, unDom = El _ a})) = case snd $ asView p of
+noShadowingOfConstructors :: ProblemEq -> TCM ()
+noShadowingOfConstructors (ProblemEq p _ (Dom{domInfo = info, unDom = El _ a})) =
+  case snd $ asView p of
    A.WildP       {} -> return ()
    A.AbsurdP     {} -> return ()
    A.DotP        {} -> return ()
@@ -325,7 +320,7 @@ noShadowingOfConstructors mkCall eqs =
    -- Due to parameter refinement, there can be (invisible) variable patterns from module
    -- parameters that shadow constructors.
    -- Thus, only complain about user written variable that shadow constructors.
-   A.VarP (A.BindName x) -> when (getOrigin info == UserWritten) $ do
+   A.VarP A.BindName{unBind = x} -> when (getOrigin info == UserWritten) $ do
     reportSDoc "tc.lhs.shadow" 30 $ vcat
       [ text $ "checking whether pattern variable " ++ prettyShow x ++ " shadows a constructor"
       , nest 2 $ "type of variable =" <+> prettyTCM a
@@ -433,11 +428,11 @@ getLeftoverPatterns eqs = do
 
     getLeftoverPattern :: ProblemEq -> TCM LeftoverPatterns
     getLeftoverPattern (ProblemEq p v a) = case p of
-      (A.VarP (A.BindName x)) -> isEtaVar v (unDom a) >>= \case
+      (A.VarP A.BindName{unBind = x}) -> isEtaVar v (unDom a) >>= \case
         Just i  -> return $ patternVariable x i
         Nothing -> return $ asPattern x v a
       (A.WildP _)       -> return mempty
-      (A.AsP info (A.BindName x) p)  -> (asPattern x v a `mappend`) <$> do
+      (A.AsP info A.BindName{unBind = x} p)  -> (asPattern x v a `mappend`) <$> do
         getLeftoverPattern $ ProblemEq p v a
       (A.DotP info e)   -> return $ dotPattern e v a
       (A.AbsurdP info)  -> return $ absurdPattern (getRange info) (unDom a)
@@ -484,8 +479,9 @@ transferOrigins ps qs = do
     transfers (p : ps) [] = __IMPOSSIBLE__
     transfers (p : ps) (q : qs)
       | matchingArgs p q = do
-          q' <- setOrigin (getOrigin p) <$>
-                  (traverse $ traverse $ transfer $ namedArg p) q
+          q' <- mapNameOf (maybe id (const . Just) $ getNameOf p) -- take NamedName from p if present
+              . setOrigin (getOrigin p)
+            <$> (traverse $ traverse $ transfer $ namedArg p) q
           (q' :) <$> transfers ps qs
       | otherwise = (setOrigin Inserted q :) <$> transfers (p : ps) qs
 
@@ -536,9 +532,9 @@ transferOrigins ps qs = do
       -- 2. or they are both visible,
       | visible p && visible q = True
       -- 3. or they have the same hiding and the argument is not named,
-      | sameHiding p q && isNothing (nameOf (unArg p)) = True
+      | sameHiding p q && isNothing (getNameOf p) = True
       -- 4. or they have the same hiding and the same name.
-      | sameHiding p q && nameOf (unArg p) == nameOf (unArg q) = True
+      | sameHiding p q && namedSame p q = True
       -- Otherwise this argument was inserted by the typechecker.
       | otherwise = False
 
@@ -673,7 +669,7 @@ instance InstantiateFull LHSResult where
 
 checkLeftHandSide :: forall a.
      Call
-     -- ^ Trace, e.g. @CheckPatternShadowing clause@
+     -- ^ Trace, e.g. 'CheckLHS' or 'CheckPattern'.
   -> Maybe QName
      -- ^ The name of the definition we are checking.
   -> [NamedArg A.Pattern]
@@ -688,14 +684,16 @@ checkLeftHandSide :: forall a.
   -> (LHSResult -> TCM a)
      -- ^ Continuation.
   -> TCM a
-checkLeftHandSide c f ps a withSub' strippedPats = Bench.billToCPS [Bench.Typing, Bench.CheckLHS] $ \ ret -> do
+checkLeftHandSide call f ps a withSub' strippedPats =
+ Bench.billToCPS [Bench.Typing, Bench.CheckLHS] $
+ traceCallCPS call $ \ ret -> do
 
   -- To allow module parameters to be refined by matching, we're adding the
   -- context arguments as wildcard patterns and extending the type with the
   -- context telescope.
   cxt <- map (setOrigin Inserted) . reverse <$> getContext
   let tel = telFromList' prettyShow cxt
-      cps = [ unnamed . A.VarP . A.BindName . fst <$> argFromDom d
+      cps = [ unnamed . A.VarP . A.mkBindName . fst <$> argFromDom d
             | d <- cxt ]
       eqs0 = zipWith3 ProblemEq (map namedArg cps) (map var $ downFrom $ size tel) (flattenTel tel)
 
@@ -716,7 +714,7 @@ checkLeftHandSide c f ps a withSub' strippedPats = Bench.billToCPS [Bench.Typing
         delta <- forceTranslateTelescope delta qs0
 
         addContext delta $ do
-          noShadowingOfConstructors c eqs
+          mapM_ noShadowingOfConstructors eqs
           noPatternMatchingOnCodata qs0
 
         -- Compute substitution from the out patterns @qs0@
@@ -868,10 +866,10 @@ checkLHS
   => Maybe QName      -- ^ The name of the definition we are checking.
   -> LHSState a       -- ^ The current state.
   -> tcm a
-checkLHS mf = updateRelevance checkLHS_ where
+checkLHS mf = updateModality checkLHS_ where
     -- If the target type is irrelevant or in Prop,
     -- we need to check the lhs in irr. cxt. (see Issue 939).
- updateRelevance cont st@(LHSState tel ip problem target psplit) = do
+ updateModality cont st@(LHSState tel ip problem target psplit) = do
       let m = getModality target
       applyModalityToContext m $ do
         cont $ over (lhsTel . listTel) (map $ inverseApplyModality m) st
@@ -1169,6 +1167,8 @@ checkLHS mf = updateRelevance checkLHS_ where
       --
       -- Thus, no checking of (usableQuantity info) here.
 
+      unlessM (splittableCohesion info) $
+        addContext delta1 $ softTypeError $ SplitOnUnusableCohesion dom
 
       -- check that a is indeed the type of lit (otherwise fail softly)
       -- if not, fail softly since it could be instantiated by a later split.
@@ -1194,6 +1194,7 @@ checkLHS mf = updateRelevance checkLHS_ where
         [ "checking lhs"
         , nest 2 $ "tel =" <+> prettyTCM tel
         , nest 2 $ "rel =" <+> (text $ show $ getRelevance info)
+        , nest 2 $ "mod =" <+> (text $ show $ getModality  info)
         ]
 
       reportSDoc "tc.lhs.split" 15 $ vcat
@@ -1215,6 +1216,9 @@ checkLHS mf = updateRelevance checkLHS_ where
       -- if there is a single constructor (checked in Coverage).
       --
       -- Thus, no checking of (usableQuantity info) here.
+
+      unlessM (splittableCohesion info) $
+        addContext delta1 $ softTypeError $ SplitOnUnusableCohesion dom
 
       -- We should be at a data/record type
       (dr, d, pars, ixs) <- addContext delta1 $ isDataOrRecordType a
@@ -1307,6 +1311,14 @@ checkLHS mf = updateRelevance checkLHS_ where
       -- and lifting over Δ₂ gives the final substitution ρ = ρ₃;Δ₂
       -- from Δ' = Δ₁';Δ₂ρ₃
       --        Δ' ⊢ ρ : Δ₁(x : D vs ws)Δ₂
+
+      -- Andrea 2019-07-17 propagate the Cohesion to the equation telescope
+      -- TODO: should we propagate the modality in general?
+      -- See also Coverage checking.
+      da' <- do
+             let updCoh = composeCohesion (getCohesion info)
+             TelV tel dt <- telView da'
+             return $ abstract (mapCohesion updCoh <$> tel) a
 
       liftTCM (unifyIndices delta1Gamma flex da' cixs ixs') >>= \case
 
@@ -1625,10 +1637,11 @@ disambiguateProjection h ambD@(AmbQ ds) b = do
         -- If this was not an ambiguous projection, that's an error.
         argd <- maybe (wrongProj d) return $ List.find ((d ==) . unArg) fs
 
-        let ai = setRelevance (getRelevance argd) $ projArgInfo proj
+        let ai = setModality (getModality argd) $ projArgInfo proj
 
-        reportSDoc "tc.lhs.split" 20 $ sep
+        reportSDoc "tc.lhs.split" 20 $ vcat
           [ text $ "original proj relevance  = " ++ show (getRelevance argd)
+          , text $ "original proj quantity   = " ++ show (getQuantity  argd)
           ]
         -- Andreas, 2016-12-31, issue #2374:
         -- We can also disambiguate by hiding info.

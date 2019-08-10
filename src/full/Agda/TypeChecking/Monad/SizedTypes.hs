@@ -8,18 +8,13 @@ module Agda.TypeChecking.Monad.SizedTypes where
 import qualified Data.Foldable as Fold
 import qualified Data.Traversable as Trav
 
-import Agda.Interaction.Options
-
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 
 import Agda.TypeChecking.Monad.Base
-import Agda.TypeChecking.Monad.Debug
-import Agda.TypeChecking.Monad.Options
 import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Monad.State
 import Agda.TypeChecking.Positivity.Occurrence
-import Agda.TypeChecking.Substitute ()
 
 import Agda.Utils.Except ( MonadError(catchError) )
 import Agda.Utils.List
@@ -57,6 +52,10 @@ instance IsSizeType a => IsSizeType (Type' a) where
 
 instance IsSizeType Term where
   isSizeType v = isSizeTypeTest <*> pure v
+
+instance IsSizeType CompareAs where
+  isSizeType (AsTermsOf a) = isSizeType a
+  isSizeType AsTypes       = return Nothing
 
 isSizeTypeTest :: (HasOptions m, HasBuiltins m) => m (Term -> Maybe BoundedSize)
 isSizeTypeTest =

@@ -1,10 +1,10 @@
 module Agda.TypeChecking.Monad.Debug where
 
-import Control.Monad.IO.Class (MonadIO)
-import Control.Monad.Reader
+
+
 
 import Agda.TypeChecking.Monad.Base
-import {-# SOURCE #-} Agda.TypeChecking.Monad.Options
+
 
 import Agda.Utils.Pretty
 import Agda.Utils.Trie (Trie)
@@ -36,6 +36,5 @@ class (Functor m, Applicative m, Monad m) => MonadDebug m where
 
 instance MonadDebug TCM
 
-reportS :: MonadDebug m => VerboseKey -> Int -> String -> m ()
 reportSLn :: MonadDebug m => VerboseKey -> Int -> String -> m ()
 reportSDoc :: MonadDebug m => VerboseKey -> Int -> TCM Doc -> m ()

@@ -6,21 +6,16 @@ import Prelude hiding ( null )
 import Data.Function
 import qualified Data.Set as Set
 import qualified Data.List as List
-import Data.Maybe ( catMaybes )
-import Control.Monad ( guard, forM, unless )
 
 import Agda.TypeChecking.Monad.Base
-import Agda.TypeChecking.Monad.Caching
 import {-# SOURCE #-} Agda.TypeChecking.Errors
 import Agda.TypeChecking.Monad.MetaVars
 import Agda.TypeChecking.Monad.Options
-import Agda.TypeChecking.Positivity
+import Agda.TypeChecking.Positivity () --instance only
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Pretty.Call
 
 import Agda.Syntax.Position
-import Agda.Syntax.Parser
-import Agda.Syntax.Concrete.Definitions (DeclarationWarning(..))
 import Agda.Syntax.Internal
 import Agda.Syntax.Translation.InternalToAbstract
 
@@ -31,7 +26,6 @@ import Agda.Interaction.Options.Warnings
 import Agda.Utils.Lens
 import Agda.Utils.Null
 import qualified Agda.Utils.Pretty as P
-import Agda.Utils.Except
 
 instance PrettyTCM TCWarning where
   prettyTCM = return . tcWarningPrintedWarning
@@ -227,6 +221,10 @@ prettyWarning wng = case wng of
            ]
         ] ++ map (nest 2 . return) cs
 
+    PragmaCompileErased bn qn -> fsep $
+      pwords "The backend" ++ [text bn] ++ pwords "erases" ++ [prettyTCM qn]
+      ++ pwords "so the COMPILE pragma will be ignored."
+
 prettyTCWarnings :: [TCWarning] -> TCM String
 prettyTCWarnings = fmap (unlines . List.intersperse "") . prettyTCWarnings'
 
@@ -264,7 +262,7 @@ applyFlagsToTCWarnings' isMain ws = do
   -- filter out the warnings the flags told us to ignore
   let cleanUp w = let wName = warningName w in
         wName /= SafeFlagPragma_
-        && wName `elem` warnSet
+        && wName `Set.member` warnSet
         && case w of
           UnsolvedMetaVariables ums    -> not $ null ums
           UnsolvedInteractionMetas uis -> not $ null uis

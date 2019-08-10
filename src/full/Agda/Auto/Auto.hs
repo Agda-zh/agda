@@ -7,7 +7,6 @@ module Agda.Auto.Auto
 
 import Prelude hiding (null)
 
-import Data.Functor
 import Control.Monad.State
 import qualified Data.List as List
 import qualified Data.Map as Map
@@ -15,6 +14,7 @@ import Data.IORef
 import qualified System.Timeout
 import Data.Maybe
 import qualified Data.Traversable as Trav
+import qualified Data.HashMap.Strict as HMap
 
 import Agda.Utils.Permutation (permute, takeP)
 import Agda.TypeChecking.Monad hiding (withCurrentModule)
@@ -33,11 +33,9 @@ import Agda.TypeChecking.Reduce (normalise)
 import Agda.Syntax.Common
 import qualified Agda.Syntax.Scope.Base as Scope
 import Agda.Syntax.Scope.Monad (withCurrentModule)
-import Agda.Syntax.Concrete.Name (NameInScope(..), LensInScope(..))
 import qualified Agda.Syntax.Abstract.Name as AN
 import qualified Agda.TypeChecking.Monad.Base as TCM
 import Agda.TypeChecking.EtaContract (etaContract)
-import qualified Agda.Utils.HashMap as HMap
 
 import Agda.Auto.Options
 import Agda.Auto.Convert

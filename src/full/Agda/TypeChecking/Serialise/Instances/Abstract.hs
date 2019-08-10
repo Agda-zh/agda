@@ -10,20 +10,16 @@ import Agda.Syntax.Common
 import qualified Agda.Syntax.Abstract as A
 import Agda.Syntax.Info
 import Agda.Syntax.Scope.Base
-import Agda.Syntax.Position as P
 import Agda.Syntax.Fixity
 
 import Agda.TypeChecking.Serialise.Base
-import Agda.TypeChecking.Serialise.Instances.Common ()
-
-import Agda.TypeChecking.Monad
-
-import Agda.Utils.Except
+import Agda.TypeChecking.Serialise.Instances.Common () --instance only
 
 import Agda.Utils.Impossible
 
+-- Don't serialize the tactic.
 instance EmbPrj A.BindName where
-  icod_ (A.BindName n) = icodeN' A.BindName n
+  icod_ (A.BindName a) = icodeN' A.BindName a
   value = valueN A.BindName
 
 instance EmbPrj Scope where
@@ -93,27 +89,29 @@ instance EmbPrj AbstractModule where
   value = valueN AbsModule
 
 instance EmbPrj KindOfName where
-  icod_ DefName        = icodeN' DefName
-  icod_ ConName        = icodeN 1 ConName
-  icod_ FldName        = icodeN 2 FldName
-  icod_ PatternSynName = icodeN 3 PatternSynName
-  icod_ QuotableName   = icodeN 4 QuotableName
-  icod_ MacroName      = icodeN 5 MacroName
-  icod_ GeneralizeName = icodeN 6 GeneralizeName
-  icod_ DisallowedGeneralizeName = icodeN 7 DisallowedGeneralizeName
+  -- -- Enums have a generic EmbPrj
+  --
+  -- icod_ DefName        = icodeN' DefName
+  -- icod_ ConName        = icodeN 1 ConName
+  -- icod_ FldName        = icodeN 2 FldName
+  -- icod_ PatternSynName = icodeN 3 PatternSynName
+  -- icod_ QuotableName   = icodeN 4 QuotableName
+  -- icod_ MacroName      = icodeN 5 MacroName
+  -- icod_ GeneralizeName = icodeN 6 GeneralizeName
+  -- icod_ DisallowedGeneralizeName = icodeN 7 DisallowedGeneralizeName
 
-  value = vcase valu where
-    valu []  = valuN DefName
-    valu [1] = valuN ConName
-    valu [2] = valuN FldName
-    valu [3] = valuN PatternSynName
-    valu [4] = valuN QuotableName
-    valu [5] = valuN MacroName
-    valu [6] = valuN GeneralizeName
-    valu [7] = valuN DisallowedGeneralizeName
-    valu _   = malformed
+  -- value = vcase valu where
+  --   valu []  = valuN DefName
+  --   valu [1] = valuN ConName
+  --   valu [2] = valuN FldName
+  --   valu [3] = valuN PatternSynName
+  --   valu [4] = valuN QuotableName
+  --   valu [5] = valuN MacroName
+  --   valu [6] = valuN GeneralizeName
+  --   valu [7] = valuN DisallowedGeneralizeName
+  --   valu _   = malformed
 
-instance EmbPrj Binder where
+instance EmbPrj BindingSource where
   icod_ LambdaBound   = icodeN' LambdaBound
   icod_ PatternBound  = icodeN 1 PatternBound
   icod_ LetBound      = icodeN 2 LetBound

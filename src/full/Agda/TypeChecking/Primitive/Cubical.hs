@@ -5,7 +5,6 @@ module Agda.TypeChecking.Primitive.Cubical where
 import Prelude hiding (null, (!!))
 
 import Control.Monad
-import Control.Monad.Reader
 import Control.Monad.Trans ( lift )
 
 import Data.Either ( partitionEithers )
@@ -13,12 +12,11 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Foldable hiding (null)
 
 import Agda.Interaction.Options ( optCubical )
 
 import Agda.Syntax.Common
-import Agda.Syntax.Position
-import Agda.Syntax.Literal
 import Agda.Syntax.Internal
 
 import Agda.TypeChecking.Names
@@ -400,6 +398,49 @@ instance Reduce a => Reduce (FamilyOrNot a) where
   reduceB' x = traverse id <$> traverse reduceB' x
   reduce' x = traverse reduce' x
 
+
+-- | Define a "ghcomp" version of gcomp. Normal comp looks like:
+--
+-- comp^i A [ phi -> u ] u0 = hcomp^i A(1/i) [ phi -> forward A i u ] (forward A 0 u0)
+--
+-- So for "gcomp" we compute:
+--
+-- gcomp^i A [ phi -> u ] u0 = hcomp^i A(1/i) [ phi -> forward A i u, ~ phi -> forward A 0 u0 ] (forward A 0 u0)
+--
+-- The point of this is that gcomp does not produce any empty
+-- systems (if phi = 0 it will reduce to "forward A 0 u".
+mkGComp :: HasBuiltins m => String -> NamesT m (NamesT m Term -> NamesT m Term -> NamesT m Term -> NamesT m Term -> NamesT m Term -> NamesT m Term)
+mkGComp s = do
+  let getTermLocal = getTerm s
+  tPOr <- getTermLocal "primPOr"
+  tIMax <- getTermLocal builtinIMax
+  tIMin <- getTermLocal builtinIMin
+  tINeg <- getTermLocal builtinINeg
+  tHComp <- getTermLocal builtinHComp
+  tTrans <- getTermLocal builtinTrans
+  io      <- getTermLocal builtinIOne
+  iz      <- getTermLocal builtinIZero
+  let ineg j = pure tINeg <@> j
+      imax i j = pure tIMax <@> i <@> j
+      imin i j = pure tIMin <@> i <@> j
+  let forward la bA r u = pure tTrans <#> (lam "i" $ \ i -> la <@> (i `imax` r))
+                                      <@> (lam "i" $ \ i -> bA <@> (i `imax` r))
+                                      <@> r
+                                      <@> u
+  return $ \ la bA phi u u0 ->
+    pure tHComp <#> (la <@> pure io)
+                <#> (bA <@> pure io)
+                <#> imax phi (ineg phi)
+                <@> (lam "i" $ \ i ->
+                      pure tPOr <#> (la <@> i)
+                                <@> phi
+                                <@> ineg phi
+                                <@> (ilam "o" $ \ a -> bA <@> i)
+                                <@> (ilam "o" $ \ o -> forward la bA i (u <@> i <..> o))
+                                <@> (ilam "o" $ \ o -> forward la bA (pure iz) u0))
+                <@> forward la bA (pure iz) u0
+
+
 primTransHComp :: TranspOrHComp -> [Arg Term] -> Int -> ReduceM (Reduced MaybeReducedArgs Term)
 primTransHComp cmd ts nelims = do
   (l,bA,phi,u,u0) <- case (cmd,ts) of
@@ -454,6 +495,7 @@ primTransHComp cmd ts nelims = do
                let
                    fallback = fallback' (fmap famThing $ st *> sbA)
                    t = ignoreBlocking st
+               mHComp <- getPrimitiveName' builtinHComp
                mGlue <- getPrimitiveName' builtinGlue
                mId   <- getBuiltinName' builtinId
                pathV <- pathView'
@@ -463,10 +505,14 @@ primTransHComp cmd ts nelims = do
                  Pi a b | nelims > 0  -> maybe fallback redReturn =<< compPi cmd "i" ((a,b) <$ t) (ignoreBlocking sphi) u u0
                         | otherwise -> fallback
 
-                 Sort (Type l) -> compSort cmd fallback phi u u0 (l <$ t)
+                 Sort (Type l) | DoTransp <- cmd -> compSort cmd fallback phi u u0 (l <$ t)
 
                  Def q [Apply la, Apply lb, Apply bA, Apply phi', Apply bT, Apply e] | Just q == mGlue -> do
                    compGlue cmd phi u u0 ((la, lb, bA, phi', bT, e) <$ t)
+
+                 Def q [Apply _, Apply s, Apply phi', Apply bT, Apply bA]
+                   | Just q == mHComp, Sort (Type la) <- unArg s  -> do
+                   compHCompU cmd phi u u0 ((Level la <$ s, phi', bT, bA) <$ t)
 
                  -- Path/PathP
                  d | PathType _ _ _ bA x y <- pathV (El __DUMMY_SORT__ d) -> do
@@ -501,22 +547,158 @@ primTransHComp cmd ts nelims = do
     compSort DoTransp fallback phi Nothing u0 (IsFam l) = do
       -- TODO should check l is constant
       redReturn $ unArg u0
-    compSort DoHComp fallback phi (Just u) u0 (IsNot l) = do
-      let getTermLocal = getTerm (builtinHComp ++ " for Set")
-      checkPrims <- all isJust <$> sequence [getTerm' builtinPathToEquiv, getTerm' builtinGlue]
-      if not checkPrims then fallback else (redReturn =<<) . runNamesT [] $ do
-        p2equiv <- getTermLocal builtinPathToEquiv
-        tGlue   <- getTermLocal builtinGlue
-        tINeg   <- getTermLocal builtinINeg
-        io      <- getTermLocal builtinIOne
-        l <- open $ Level l
-        [phi,e,u0] <- mapM (open . unArg) [phi,u,u0]
-        let
-          ineg r = pure tINeg <@> r
-        pure tGlue <#> l <#> l
-               <@> u0 <#> phi <@> (e <@> pure io)
-               <@> ilam "o" (\ o -> pure p2equiv <#> (lam "i" $ \ i -> l) <@> (ilam "i" $ \ i -> e <@> ineg i <@> o))
+    -- compSort DoHComp fallback phi (Just u) u0 (IsNot l) = -- hcomp for Set is a whnf, handled above.
     compSort _ fallback phi u u0 _ = __IMPOSSIBLE__
+    compHCompU DoHComp psi (Just u) u0 (IsNot (la, phi, bT, bA)) = do
+      let getTermLocal = getTerm $ (builtinHComp ++ " for " ++ builtinHComp ++ " of Set")
+      io      <- getTermLocal builtinIOne
+      iz      <- getTermLocal builtinIZero
+      tPOr <- getTermLocal "primPOr"
+      tIMax <- getTermLocal builtinIMax
+      tIMin <- getTermLocal builtinIMin
+      tINeg <- getTermLocal builtinINeg
+      tHComp <- getTermLocal builtinHComp
+      tTransp  <- getTermLocal builtinTrans
+      tglue   <- getTermLocal builtin_glueU
+      tunglue <- getTermLocal builtin_unglueU
+      tLSuc   <- getTermLocal builtinLevelSuc
+      tSubIn <- getTermLocal builtinSubIn
+      (redReturn =<<) . runNamesT [] $ do
+        [psi, u, u0] <- mapM (open . unArg) [psi, u, u0]
+        [la, phi, bT, bA] <- mapM (open . unArg) [la, phi, bT, bA]
+        let
+          hfill la bA phi u u0 i = pure tHComp <#> la
+                                               <#> bA
+                                               <#> (pure tIMax <@> phi <@> (pure tINeg <@> i))
+                                               <@> (lam "j" $ \ j -> pure tPOr <#> la <@> phi <@> (pure tINeg <@> i) <@> (ilam "o" $ \ a -> bA)
+                                                     <@> (ilam "o" $ \ o -> u <@> (pure tIMin <@> i <@> j) <..> o)
+                                                     <@> (ilam "o" $ \ _ -> u0)
+                                                   )
+                                               <@> u0
+          transp la bA a0 = pure tTransp <#> (lam "i" $ const la) <@> lam "i" bA <@> pure iz <@> a0
+          tf i o = hfill la (bT <@> pure io <..> o) psi u u0 i
+          bAS = pure tSubIn <#> (pure tLSuc <@> la) <#> (Sort . tmSort <$> la) <#> phi <@> bA
+          unglue g = pure tunglue <#> la <#> phi <#> bT <#> bAS <@> g
+          a1 = pure tHComp <#> la <#> bA <#> (pure tIMax <@> psi <@> phi)
+                           <@> (lam "i" $ \ i -> pure tPOr <#> la <@> psi <@> phi <@> (ilam "_" $ \ _ -> bA)
+                                 <@> (ilam "o" $ \ o -> unglue (u <@> i <..> o))
+                                 <@> (ilam "o" $ \ o -> transp la (\ i -> bT <@> (pure tINeg <@> i) <..> o) (tf i o))
+                               )
+                           <@> unglue u0
+          t1 = tf (pure io)
+        pure tglue <#> la <#> phi <#> bT <#> bAS <@> (ilam "o" $ \ o -> t1 o) <@> a1
+    compHCompU DoTransp psi Nothing u0 (IsFam (la, phi, bT, bA)) = do
+      let
+        localUse = builtinTrans ++ " for " ++ builtinHComp ++ " of Set"
+        getTermLocal = getTerm localUse
+      tPOr <- getTermLocal "primPOr"
+      tIMax <- getTermLocal builtinIMax
+      tIMin <- getTermLocal builtinIMin
+      tINeg <- getTermLocal builtinINeg
+      tHComp <- getTermLocal builtinHComp
+      tTrans <- getTermLocal builtinTrans
+      tTranspProof <- getTermLocal builtinTranspProof
+      tSubIn <- getTermLocal builtinSubIn
+      tForall  <- getTermLocal builtinFaceForall
+      io      <- getTermLocal builtinIOne
+      iz      <- getTermLocal builtinIZero
+      tLSuc   <- getTermLocal builtinLevelSuc
+      tPath   <- getTermLocal builtinPath
+      kit <- fromMaybe __IMPOSSIBLE__ <$> getSigmaKit
+      (redReturn =<<) . runNamesT [] $ do
+        let ineg j = pure tINeg <@> j
+            imax i j = pure tIMax <@> i <@> j
+            imin i j = pure tIMin <@> i <@> j
+            transp la bA a0 = pure tTrans <#> (lam "i" $ const la) <@> lam "i" bA <@> pure iz <@> a0
+
+        gcomp <- mkGComp localUse
+
+        let transpFill la bA phi u0 i =
+              pure tTrans <#> (ilam "j" $ \ j -> la <@> imin i j)
+                          <@> (ilam "j" $ \ j -> bA <@> imin i j)
+                          <@> (imax phi (ineg i))
+                          <@> u0
+        [psi,u0] <- mapM (open . unArg) [psi,u0]
+        glue1 <- do
+          tglue   <- cl $ getTermLocal builtin_glueU
+          [la, phi, bT, bA] <- mapM (open . unArg . subst 0 io) $ [la, phi, bT, bA]
+          let bAS = pure tSubIn <#> (pure tLSuc <@> la) <#> (Sort . tmSort <$> la) <#> phi <@> bA
+          g <- (open =<<) $ pure tglue <#> la <#> phi <#> bT <#> bAS
+          return $ \ t a -> g <@> t <@> a
+        unglue0 <- do
+          tunglue <- cl $ getTermLocal builtin_unglueU
+          [la, phi, bT, bA] <- mapM (open . unArg . subst 0 iz) $ [la, phi, bT, bA]
+          let bAS = pure tSubIn <#> (pure tLSuc <@> la) <#> (Sort . tmSort <$> la) <#> phi <@> bA
+          ug <- (open =<<) $ pure tunglue <#> la <#> phi <#> bT <#> bAS
+          return $ \ a -> ug <@> a
+        [la, phi, bT, bA] <- mapM (\ a -> open . runNames [] $ (lam "i" $ const (pure $ unArg a))) [la, phi, bT, bA]
+        let
+          lb = la
+          tf i o = transpFill lb (lam "i" $ \ i -> bT <@> i <@> pure io <..> o) psi u0 i
+          t1 o = tf (pure io) o
+          a0 = unglue0 u0
+
+          -- compute "forall. phi"
+          forallphi = pure tForall <@> phi
+
+          -- a1 with gcomp
+          a1 = gcomp la bA
+                 (imax psi forallphi)
+                 (lam "i" $ \ i -> pure tPOr <#> (la <@> i)
+                                             <@> psi
+                                             <@> forallphi
+                                             <@> (ilam "o" $ \ a -> bA <@> i)
+                                             <@> (ilam "o" $ \ _ -> a0)
+                                             <@> (ilam "o" $ \ o -> transp (la <@> i)
+                                                                           (\ j -> bT <@> i <@> ineg j <..> o)
+                                                                           (tf i o)))
+                 a0
+
+--          max l l' = pure tLMax <@> l <@> l'
+          sigCon x y = pure (Con (sigmaCon kit) ConOSystem []) <@> x <@> y
+          w i o = lam "x" $
+                  transp (la <@> i)
+                         (\ j -> bT <@> i <@> ineg j <..> o)
+          fiber la lb bA bB f b =
+            (pure (Def (sigmaName kit) []) <#> la
+                                           <#> lb
+                                           <@> bA
+                                           <@> (lam "a" $ \ a -> pure tPath <#> lb <#> bB <@> (f <@> a) <@> b))
+
+          pt o = -- o : [ φ 1 ]
+            pure tPOr <#> (la <@> pure io)
+                      <@> psi
+                      <@> forallphi
+                      <@> (ilam "o" $ \ _ -> bT <@> pure io <@> pure io <..> o)
+                      <@> (ilam "o" $ \ o -> u0)
+                      <@> (ilam "o" $ \ o -> t1 o)
+
+          -- "ghcomp" is implemented in the proof of tTranspProof
+          -- (see src/data/lib/prim/Agda/Builtin/Cubical/HCompU.agda)
+          t1'alpha o = -- o : [ φ 1 ]
+             pure tTranspProof <#> (la <@> pure io)
+                               <@> (lam "i" $ \ i -> bT <@> pure io <@> ineg i <..> o)
+                               <@> imax psi forallphi
+                               <@> pt o
+                               <@> (pure tSubIn <#> (la <@> pure io) <#> (bA <@> pure io)
+                                                <#> imax psi forallphi
+                                                <@> a1)
+
+          -- TODO: optimize?
+          t1' o = t1'alpha o <&> (`applyE` [Proj ProjSystem (sigmaFst kit)])
+          alpha o = t1'alpha o <&> (`applyE` [Proj ProjSystem (sigmaSnd kit)])
+          a1' = pure tHComp
+                  <#> (la <@> pure io)
+                  <#> (bA <@> pure io)
+                  <#> (imax (phi <@> pure io) psi)
+                  <@> (lam "j" $ \ j ->
+                         pure tPOr <#> (la <@> pure io) <@> (phi <@> pure io) <@> psi <@> (ilam "o" $ \ _ -> bA <@> pure io)
+                                   <@> (ilam "o" $ \ o -> alpha o <@@> (w (pure io) o <@> t1' o,a1,j))
+                                   <@> (ilam "o" $ \ _ -> a1)
+                      )
+                  <@> a1
+        glue1 (ilam "o" t1') a1'
+    compHCompU _ psi _ u0 _ = __IMPOSSIBLE__
     compGlue DoHComp psi (Just u) u0 (IsNot (la, lb, bA, phi, bT, e)) = do
       let getTermLocal = getTerm $ (builtinHComp ++ " for " ++ builtinGlue)
       tPOr <- getTermLocal "primPOr"
@@ -551,7 +733,9 @@ primTransHComp cmd ts nelims = do
           t1 = tf (pure io)
         pure tglue <#> la <#> lb <#> bA <#> phi <#> bT <#> e <@> (ilam "o" $ \ o -> t1 o) <@> a1
     compGlue DoTransp psi Nothing u0 (IsFam (la, lb, bA, phi, bT, e)) = do
-      let getTermLocal = getTerm $ (builtinTrans ++ " for " ++ builtinGlue)
+      let
+        localUse = builtinTrans ++ " for " ++ builtinGlue
+        getTermLocal = getTerm localUse
       tPOr <- getTermLocal "primPOr"
       tIMax <- getTermLocal builtinIMax
       tIMin <- getTermLocal builtinIMin
@@ -567,39 +751,14 @@ primTransHComp cmd ts nelims = do
       iz      <- getTermLocal builtinIZero
       tLMax   <- getTermLocal builtinLevelMax
       tPath   <- getTermLocal builtinPath
+      tTransp <- getTermLocal builtinTranspProof
       kit <- fromMaybe __IMPOSSIBLE__ <$> getSigmaKit
       (redReturn =<<) . runNamesT [] $ do
         let ineg j = pure tINeg <@> j
             imax i j = pure tIMax <@> i <@> j
             imin i j = pure tIMin <@> i <@> j
 
-        -- First define a "ghcomp" version of gcomp. Normal comp looks like:
-        --
-        -- comp^i A [ phi -> u ] u0 = hcomp^i A(1/i) [ phi -> forward A i u ] (forward A 0 u0)
-        --
-        -- So for "gcomp" we compute:
-        --
-        -- gcomp^i A [ phi -> u ] u0 = hcomp^i A(1/i) [ phi -> forward A i u, ~ phi -> forward A 0 u0 ] (forward A 0 u0)
-        --
-        -- The point of this is that gcomp does not produce any empty
-        -- systems (if phi = 0 it will reduce to "forward A 0 u".
-        gcomp <- do
-          let forward la bA r u = pure tTrans <#> (lam "i" $ \ i -> la <@> (i `imax` r))
-                                              <@> (lam "i" $ \ i -> bA <@> (i `imax` r))
-                                              <@> r
-                                              <@> u
-          return $ \ la bA phi u u0 ->
-            pure tHComp <#> (la <@> pure io)
-                        <#> (bA <@> pure io)
-                        <#> imax phi (ineg phi)
-                        <@> (lam "i" $ \ i ->
-                              pure tPOr <#> (la <@> i)
-                                        <@> phi
-                                        <@> ineg phi
-                                        <@> (ilam "o" $ \ a -> bA <@> i)
-                                        <@> (ilam "o" $ \ o -> forward la bA i (u <@> i <..> o))
-                                        <@> (ilam "o" $ \ o -> forward la bA (pure iz) u0))
-                        <@> forward la bA (pure iz) u0
+        gcomp <- mkGComp localUse
 
         let transpFill la bA phi u0 i =
               pure tTrans <#> (ilam "j" $ \ j -> la <@> imin i j)
@@ -674,7 +833,7 @@ primTransHComp cmd ts nelims = do
                           <@> (bA <@> pure io)
                           <@> (e <@> pure io <..> o)
                           <@> a1
-                          <@> forallphi
+                          <@> (imax psi forallphi)
                           <@> pe o
 
           -- TODO: optimize?
@@ -882,27 +1041,45 @@ primTransHComp cmd ts nelims = do
             let
               boolToI b = if b then unview IOne else unview IZero
             as <- decomposeInterval phi
-            (and <$>) . forM as $ \ (bs,ts) -> do -- OPTIMIZE: stop at the first False
+            andM . for as $ \ (bs,ts) -> do
                  let u' = listS (Map.toAscList $ Map.map boolToI bs) `applySubst` u
                  t <- reduce2Lam u'
-                 return $! p t
-      where
-        reduce2Lam t = do
+                 return $! p $ ignoreBlocking t
+    reduce2Lam t = do
           t <- reduce' t
           case lam2Abs t of
             t -> underAbstraction_ t $ \ t -> do
                t <- reduce' t
                case lam2Abs t of
-                 t -> underAbstraction_ t reduce'
+                 t -> underAbstraction_ t reduceB'
          where
-           lam2Abs (Lam _ t) = t
+           lam2Abs (Lam _ t) = absBody t <$ t
            lam2Abs t         = Abs "y" (raise 1 t `apply` [argN $ var 0])
-
+    allComponentsBack unview phi u p = do
+            let
+              boolToI b = if b then unview IOne else unview IZero
+              lamlam t = Lam defaultArgInfo (Abs "i" (Lam (setRelevance Irrelevant defaultArgInfo) (Abs "o" t)))
+            as <- decomposeInterval phi
+            (flags,t_alphas) <- fmap unzip . forM as $ \ (bs,ts) -> do
+                 let u' = listS bs' `applySubst` u
+                     bs' = (Map.toAscList $ Map.map boolToI bs)
+                 let weaken = foldr composeS idS $ map (\ j -> liftS j (raiseS 1)) $ map fst bs'
+                 t <- reduce2Lam u'
+                 return $ (p $ ignoreBlocking t, listToMaybe [ (weaken `applySubst` (lamlam <$> t),bs) | null ts ])
+            return $ (flags,t_alphas)
     compData False _ cmd@DoHComp (IsNot l) (IsNot ps) fsc sphi (Just u) a0 = do
       let getTermLocal = getTerm $ cmdToName cmd ++ " for data types"
 
       let sc = famThing <$> fsc
       tEmpty <- getTermLocal builtinIsOneEmpty
+      tPOr   <- getTermLocal builtinPOr
+      iO   <- getTermLocal builtinIOne
+      iZ   <- getTermLocal builtinIZero
+      tMin <- getTermLocal builtinIMin
+      tNeg <- getTermLocal builtinINeg
+      let iNeg t = tNeg `apply` [argN t]
+          iMin t u = tMin `apply` [argN t, argN u]
+          iz = pure iZ
       constrForm <- do
         mz <- getTerm' builtinZero
         ms <- getTerm' builtinSuc
@@ -915,7 +1092,17 @@ primTransHComp cmd ts nelims = do
           phi = f sphi
           u = f su
           a0 = f sa0
-          noRed = return $ NoReduction [notReduced l,reduced sc, reduced sphi, reduced su', reduced sa0]
+          isLit t@(Lit lt) = Just t
+          isLit _ = Nothing
+          isCon (Con h _ _) = Just h
+          isCon _           = Nothing
+          combine l ty d [] = d
+          combine l ty d [(psi,u)] = u
+          combine l ty d ((psi,u):xs)
+            = pure tPOr <#> l <@> psi <@> (foldr imax iz (map fst xs))
+                        <#> (ilam "o" $ \ _ -> ty) -- the type
+                        <@> u <@> (combine l ty d xs)
+          noRed' su = return $ NoReduction [notReduced l,reduced sc, reduced sphi, reduced su', reduced sa0]
             where
               su' = case view phi of
                      IZero -> notBlocked $ argN $ runNames [] $ do
@@ -923,20 +1110,41 @@ primTransHComp cmd ts nelims = do
                                  lam "i" $ \ i -> pure tEmpty <#> l
                                                               <#> (ilam "o" $ \ _ -> c)
                      _     -> su
-          sameConHead h u = allComponents unview phi u $ \ t ->
-            case constrForm t of
-              Con h' _ _ -> h == h'
-              _        -> False
+          sameConHeadBack Nothing Nothing su k = noRed' su
+          sameConHeadBack lt h su k = do
+            let u = unArg . ignoreBlocking $ su
+            (b, ts) <- allComponentsBack unview phi u $ \ t ->
+                        (isLit t == lt, isCon (constrForm t) == h)
+            let
+              (lit,hd) = unzip b
 
-      case constrForm a0 of
-        Con h _ args -> do
-          ifM (not <$> sameConHead h u) noRed $ do
-            Constructor{ conComp = (cm,_) } <- theDef <$> getConstInfo (conName h)
+            if isJust lt && and lit then redReturn a0 else do
+            su <- caseMaybe (sequence ts) (return su) $ \ ts -> do
+              let (us,bools) = unzip ts
+              fmap ((sequenceA_ us $>) . argN) $ do
+              let
+                phis :: [Term]
+                phis = for bools $ \ m ->
+                            foldr iMin iO $ map (\(i,b) -> if b then var i else iNeg (var i)) $ Map.toList m
+              runNamesT [] $ do
+                u <- open u
+                [l,c] <- mapM (open . unArg) [l,ignoreBlocking sc]
+                phis <- mapM open phis
+                us   <- mapM (open . ignoreBlocking) us
+                lam "i" $ \ i -> do
+                  combine l c (u <@> i) $ zip phis (map (\ t -> t <@> i) us)
+
+            if isJust h && and hd then k (fromMaybe __IMPOSSIBLE__ h) su
+                      else noRed' su
+
+      sameConHeadBack (isLit a0) (isCon a0) su $ \ h su -> do
+            let u = unArg . ignoreBlocking $ su
+            Constructor{ conComp = cm } <- theDef <$> getConstInfo (conName h)
             case nameOfHComp cm of
               Just hcompD -> redReturn $ Def hcompD [] `apply`
                                           (ps ++ map argN [phi,u,a0])
-              Nothing        -> noRed
-        _ -> noRed
+              Nothing        -> noRed' su
+
     compData _     0 DoTransp (IsFam l) (IsFam ps) fsc sphi Nothing a0 = redReturn $ unArg a0
     compData isHIT _ cmd@DoTransp (IsFam l) (IsFam ps) fsc sphi Nothing a0 = do
       let getTermLocal = getTerm $ cmdToName cmd ++ " for data types"
@@ -954,7 +1162,7 @@ primTransHComp cmd ts nelims = do
       let lam_i = Lam defaultArgInfo . Abs "i"
       case constrForm a0 of
         Con h _ args -> do
-          Constructor{ conComp = (cm,_) } <- theDef <$> getConstInfo (conName h)
+          Constructor{ conComp = cm } <- theDef <$> getConstInfo (conName h)
           case nameOfTransp cm of
               Just transpD -> redReturn $ Def transpD [] `apply`
                                           (map (fmap lam_i) ps ++ map argN [phi,a0])
@@ -1019,6 +1227,67 @@ primComp = do
               [l,c,phi,u,a0] <- mapM (open . unArg) [l,c,phi,u,a0]
               comp l c phi u a0
 
+      _ -> __IMPOSSIBLE__
+
+
+prim_glueU' :: TCM PrimitiveImpl
+prim_glueU' = do
+  requireCubical
+  t <- runNamesT [] $
+       (hPi' "la" (el $ cl primLevel) $ \ la ->
+       hPi' "φ" (elInf $ cl primInterval) $ \ φ ->
+       hPi' "T" (nPi' "i" (elInf $ cl primInterval) $ \ _ -> pPi' "o" φ $ \ o -> sort . tmSort <$> la) $ \ t ->
+       hPi' "A" (elInf $ cl primSub <#> (cl primLevelSuc <@> la) <@> (Sort . tmSort <$> la) <@> φ <@> (t <@> primIZero)) $ \ a -> do
+       let bA = (cl primSubOut <#> (cl primLevelSuc <@> la) <#> (Sort . tmSort <$> la) <#> φ <#> (t <@> primIZero) <@> a)
+       (pPi' "o" φ $ \ o -> el' la (t <@> cl primIOne <..> o))
+         --> (el' la bA)
+         --> el' la (cl primHComp <#> (cl primLevelSuc <@> la) <#> (Sort . tmSort <$> la) <#> φ <@> t <@> bA))
+  view <- intervalView'
+  one <- primItIsOne
+  return $ PrimImpl t $ primFun __IMPOSSIBLE__ 6 $ \ts ->
+    case ts of
+      [la,phi,bT,bA,t,a] -> do
+       sphi <- reduceB' phi
+       case view $ unArg $ ignoreBlocking $ sphi of
+         IOne -> redReturn $ unArg t `apply` [argN one]
+         _    -> return (NoReduction $ map notReduced [la] ++ [reduced sphi] ++ map notReduced [bT,bA,t,a])
+      _ -> __IMPOSSIBLE__
+
+prim_unglueU' :: TCM PrimitiveImpl
+prim_unglueU' = do
+  requireCubical
+  t <- runNamesT [] $
+       (hPi' "la" (el $ cl primLevel) $ \ la ->
+       hPi' "φ" (elInf $ cl primInterval) $ \ φ ->
+       hPi' "T" (nPi' "i" (elInf $ cl primInterval) $ \ _ -> pPi' "o" φ $ \ o -> sort . tmSort <$> la) $ \ t ->
+       hPi' "A" (elInf $ cl primSub <#> (cl primLevelSuc <@> la) <@> (Sort . tmSort <$> la) <@> φ <@> (t <@> primIZero)) $ \ a -> do
+       let bA = (cl primSubOut <#> (cl primLevelSuc <@> la) <#> (Sort . tmSort <$> la) <#> φ <#> (t <@> primIZero) <@> a)
+       el' la (cl primHComp <#> (cl primLevelSuc <@> la) <#> (Sort . tmSort <$> la) <#> φ <@> t <@> bA)
+         --> el' la bA)
+  view <- intervalView'
+  one <- primItIsOne
+  mglueU <- getPrimitiveName' builtin_glueU
+  return $ PrimImpl t $ primFun __IMPOSSIBLE__ 5 $ \ts ->
+    case ts of
+      [la,phi,bT,bA,b] -> do
+       sphi <- reduceB' phi
+       case view $ unArg $ ignoreBlocking $ sphi of
+         IOne -> do
+           tTransp <- getTerm builtin_unglueU builtinTrans
+           iNeg    <- getTerm builtin_unglueU builtinINeg
+           iZ      <- getTerm builtin_unglueU builtinIZero
+           (redReturn =<<) . runNamesT [] $ do
+             [la,bT,b] <- mapM (open . unArg) [la,bT,b]
+             pure tTransp <#> (lam "i" $ \ _ -> la)
+                          <@> (lam "i" $ \ i -> bT <@> (pure iNeg <@> i) <..> pure one)
+                          <@> pure iZ
+                          <@> b
+         _    -> do
+            sb <- reduceB' b
+            case unArg $ ignoreBlocking $ sb of
+               Def q [Apply _,Apply _,Apply _,Apply _,Apply _,Apply a]
+                     | Just q == mglueU -> redReturn $ unArg a
+               _ -> return (NoReduction $ map notReduced [la] ++ [reduced sphi] ++ map notReduced [bT,bA] ++ [reduced sb])
       _ -> __IMPOSSIBLE__
 
 
@@ -1261,4 +1530,3 @@ trFillTel delta phi args r = do
   transpTel (Abs "j" $ raise 1 delta `lazyAbsApp` (imin `apply` (map argN [var 0, raise 1 r])))
             (imax `apply` [argN $ ineg `apply` [argN r], argN phi])
             args
-

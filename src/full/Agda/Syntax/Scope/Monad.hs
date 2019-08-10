@@ -6,7 +6,7 @@
 module Agda.Syntax.Scope.Monad where
 
 import Prelude hiding (mapM, any, all)
-import Control.Arrow (first, second, (***), (&&&))
+import Control.Arrow ((***))
 import Control.Monad hiding (mapM, forM)
 import Control.Monad.Writer hiding (mapM, forM)
 import Control.Monad.State hiding (mapM, forM)
@@ -18,7 +18,7 @@ import qualified Data.Map as Map
 import Data.Maybe
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Foldable (any, all)
+import Data.Foldable (all)
 import Data.Traversable hiding (for)
 
 import Agda.Syntax.Common
@@ -26,15 +26,14 @@ import Agda.Syntax.Position
 import Agda.Syntax.Fixity
 import Agda.Syntax.Abstract.Name as A
 import qualified Agda.Syntax.Abstract as A
-import Agda.Syntax.Abstract (ScopeCopyInfo(..), initCopyInfo)
+import Agda.Syntax.Abstract (ScopeCopyInfo(..))
 import Agda.Syntax.Concrete as C
 import Agda.Syntax.Concrete.Fixity
 import Agda.Syntax.Concrete.Definitions (DeclarationWarning(..)) -- TODO: move the relevant warnings out of there
-import Agda.Syntax.Scope.Base
+import Agda.Syntax.Scope.Base as A
 
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Monad.Debug
-import Agda.TypeChecking.Monad.Options
 import Agda.TypeChecking.Monad.State
 import Agda.TypeChecking.Monad.Trace ( setCurrentRange )
 import Agda.TypeChecking.Positivity.Occurrence (Occurrence)
@@ -42,7 +41,6 @@ import Agda.TypeChecking.Warnings ( warning )
 
 import qualified Agda.Utils.AssocList as AssocList
 import Agda.Utils.Except
-import Agda.Utils.Function
 import Agda.Utils.Functor
 import Agda.Utils.Lens
 import Agda.Utils.List
@@ -51,8 +49,6 @@ import Agda.Utils.Monad
 import Agda.Utils.Null (unlessNull)
 import Agda.Utils.NonemptyList
 import Agda.Utils.Pretty
-import Agda.Utils.Size
-import Agda.Utils.Tuple
 
 import Agda.Utils.Impossible
 
@@ -229,6 +225,16 @@ freshAbstractQName' x = do
   fx <- getConcreteFixity x
   freshAbstractQName fx x
 
+-- | Create a concrete name that is not yet in scope.
+freshConcreteName :: Range -> Int -> String -> ScopeM C.Name
+freshConcreteName r i s = do
+  let cname = C.Name r C.NotInScope [Id $ stringToRawName $ s ++ show i]
+  rn <- resolveName $ C.QName cname
+  case rn of
+    UnknownName -> return cname
+    _           -> freshConcreteName r (i+1) s
+
+
 -- * Resolving names
 
 -- | Look up the abstract name referred to by a given concrete name.
@@ -359,9 +365,9 @@ getNotation x ns = do
 
 -- | Bind a variable.
 bindVariable
-  :: Binder  -- ^ @λ@, @Π@, @let@, ...?
-  -> C.Name  -- ^ Concrete name.
-  -> A.Name  -- ^ Abstract name.
+  :: A.BindingSource -- ^ @λ@, @Π@, @let@, ...?
+  -> C.Name          -- ^ Concrete name.
+  -> A.Name          -- ^ Abstract name.
   -> ScopeM ()
 bindVariable b x y = modifyLocalVars $ AssocList.insert x $ LocalVar y b []
 
@@ -657,12 +663,12 @@ applyImportDirectiveM m (ImportDirective rng usn' hdn' ren' public) scope = do
          , impRenaming = concatMap extraRenaming (impRenaming dir)
          }
       where
-        addExtra f@(ImportedName y) | elem y extra = [f, ImportedModule y]
+        addExtra f@(ImportedName y) | y `elem` extra = [f, ImportedModule y]
         addExtra m = [m]
 
         extraRenaming r@(Renaming from to rng) =
           case (from, to) of
-            (ImportedName y, ImportedName z) | elem y extra ->
+            (ImportedName y, ImportedName z) | y `elem` extra ->
               [r, Renaming (ImportedModule y) (ImportedModule z) rng]
             _ -> [r]
 

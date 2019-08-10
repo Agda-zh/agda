@@ -2,19 +2,15 @@
 
 module Agda.TypeChecking.With where
 
-import Control.Arrow ((&&&), (***), first, second)
-import Control.Applicative hiding (empty)
 import Control.Monad
 import Control.Monad.Writer (WriterT, runWriterT, tell)
 
 import Data.Either
 import qualified Data.List as List
 import Data.Maybe
-import Data.Monoid
 import Data.Traversable (traverse)
 
 import Agda.Syntax.Common
-import Agda.Syntax.Concrete.Pattern (IsWithP(..))
 import Agda.Syntax.Internal as I
 import Agda.Syntax.Internal.Pattern
 import qualified Agda.Syntax.Abstract as A
@@ -24,7 +20,6 @@ import Agda.Syntax.Info
 import Agda.Syntax.Position
 
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Datatypes
 import Agda.TypeChecking.EtaContract
@@ -34,8 +29,6 @@ import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Records
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
-import Agda.TypeChecking.ReconstructParameters
-import Agda.TypeChecking.Rules.Term
 
 import Agda.TypeChecking.Abstract
 import Agda.TypeChecking.Rules.LHS.Implicit
@@ -337,7 +330,7 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
   -- instantiations from qs, so we make sure
   -- that t is the top-level type of the parent function and add patterns for
   -- the module parameters to ps before stripping.
-  let paramPat i _ = A.VarP $ A.BindName $ indexWithDefault __IMPOSSIBLE__ cxtNames i
+  let paramPat i _ = A.VarP $ A.mkBindName $ indexWithDefault __IMPOSSIBLE__ cxtNames i
       ps' = zipWith (fmap . fmap . paramPat) [0..] (take npars qs) ++ ps
   psi <- insertImplicitPatternsT ExpandLast ps' t
   reportSDoc "tc.with.strip" 10 $ vcat
@@ -444,7 +437,7 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
         -- we can strip the dot from the with clause.
         VarP PatODot x | A.DotP _ u <- namedArg p
                        , A.Var y <- unScope u ->
-          (setNamedArg p (A.VarP $ A.BindName y) :) <$>
+          (setNamedArg p (A.VarP $ A.mkBindName y) :) <$>
             recurse (var (dbPatVarIndex x))
 
         VarP _ x  -> (p :) <$> recurse (var (dbPatVarIndex x))
@@ -500,7 +493,7 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
             -- Check whether the with-clause constructor can be (possibly trivially)
             -- disambiguated to be equal to the parent-clause constructor.
             -- Andreas, 2017-08-13, herein, ignore abstract constructors.
-            cs' <- liftTCM $ do snd . partitionEithers <$> mapM getConForm (toList cs')
+            cs' <- liftTCM $ snd . partitionEithers <$> mapM getConForm (toList cs')
             unless (elem c cs') mismatch
             -- Strip the subpatterns ps' and then continue.
             stripConP d us b c ConOCon qs' ps'

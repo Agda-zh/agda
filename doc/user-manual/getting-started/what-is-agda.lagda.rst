@@ -25,12 +25,12 @@ Agda 是什么？
 
 Agda 是一种带有依赖类型的编程语言。它是 Martin-Löf 类型论的一种扩展，也是 Chalmers
 编程语言小组语言开发传统中最新开发的语言。此传统中的其它语言包括 `Alf
-<http://www.cs.chalmers.se/~bengt/papers/alfengine.pdf>`_、`Alfa
-<http://www.cs.chalmers.se/~hallgren/Alfa/>`_、`Agda 1
-<http://unit.aist.go.jp/cvs/Agda/>`_ 和 `Cayenne
-<http://www.cs.chalmers.se/~augustss/cayenne/index.html>`_。其它紧密相关的语言包括
-`Coq <http://coq.inria.fr/>`_、`Epigram <http://www.e-pig.org/>`_ 和 `Idris
-<http://idris-lang.org/>`_。
+<http://www.cse.chalmers.se/~bengt/papers/alfengine.pdf>`_、`Alfa
+<http://www.cse.chalmers.se/~hallgren/Alfa/>`_、`Agda 1
+<https://sourceforge.net/projects/agda/>`_ 和 `Cayenne
+<https://en.wikipedia.org/wiki/Cayenne_(programming_language)>`_。其它紧密相关的语言包括
+`Coq <https://coq.inria.fr/>`_、`Epigram <http://www.e-pig.org/>`_ 和 `Idris
+<https://idris-lang.org/>`_。
 
 .. Because of strong typing and dependent types, Agda can be used as a
 .. proof assistant, allowing to prove mathematical theorems (in a
@@ -54,10 +54,10 @@ Typing for programmers
 .. Type theory is concerned both with programming and logic. We see the
 .. type system as a way to express syntactic correctness. A type correct
 .. program has a meaning.
-.. `Lisp <http://en.wikipedia.org/wiki/Lisp_%28programming_language%29>`_
+.. `Lisp <https://en.wikipedia.org/wiki/Lisp_%28programming_language%29>`_
 .. is a totally untyped programming language, and so are its derivatives
 .. like
-.. `Scheme <http://en.wikipedia.org/wiki/Scheme_%28programming_language%29>`_. In
+.. `Scheme <https://en.wikipedia.org/wiki/Scheme_%28programming_language%29>`_. In
 .. such languages, if ``f`` is a function, one can apply it to anything,
 .. including itself. This makes it easy to write programs (almost all
 .. programs are wellformed), but it also makes it easy to write erroneous
@@ -66,36 +66,36 @@ Typing for programmers
 
 类型论同时涉及到编程和逻辑。我们将类型系统看作表达语法正确性的一种方式。
 类型正确的程序才有意义。
-`Lisp <http://en.wikipedia.org/wiki/Lisp_%28programming_language%29>`_
+`Lisp <https://en.wikipedia.org/wiki/Lisp_%28programming_language%29>`_
 是一种完全无类型的编程语言，其衍生语言
-`Scheme <http://en.wikipedia.org/wiki/Scheme_%28programming_language%29>`_\ 亦是如此。
+`Scheme <https://en.wikipedia.org/wiki/Scheme_%28programming_language%29>`_\ 亦是如此。
 在这类语言中，若 ``f`` 是一个函数，那么我们可以将它应用到任何东西上，包括它自身。
 这让编写程序变得很容易（几乎所有程序都是良构的），但编写出错误的程序也很容易。
 程序可能会引发异常或死循环，而分析之问题所在也十分困难。
 
-.. `Haskell <http://www.haskell.org/>`_ or
-.. `ML <http://en.wikipedia.org/wiki/ML_%28programming_language%29>`_ and
-.. its derivatives like `Standard ML <http://en.wikipedia.org/wiki/Standard_ML>`_ and
+.. `Haskell <https://www.haskell.org/>`_ or
+.. `ML <https://en.wikipedia.org/wiki/ML_%28programming_language%29>`_ and
+.. its derivatives like `Standard ML <https://en.wikipedia.org/wiki/Standard_ML>`_ and
 .. `Caml <http://caml.inria.fr/>`_ are typed languages, where functions
 .. come with a type expressing what type of arguments the program expects
 .. and what the result type is.
 
-`Haskell <http://www.haskell.org/>`_ 或
-`ML <http://en.wikipedia.org/wiki/ML_%28programming_language%29>`_ 及其
-衍生语言如 `Standard ML <http://en.wikipedia.org/wiki/Standard_ML>`_ 和
+`Haskell <https://www.haskell.org/>`_ 或
+`ML <https://en.wikipedia.org/wiki/ML_%28programming_language%29>`_ 及其
+衍生语言如 `Standard ML <https://en.wikipedia.org/wiki/Standard_ML>`_ 和
 `Caml <http://caml.inria.fr/>`_ 都是有类型的语言，它们的函数带有的类型，\
 其类型表达了程序期望的参数类型和结果的类型。
 
 .. Between these two families of languages come languages, which may or
 .. may not have a typing discipline. Most imperative languages do not
 .. come with a rich type system. For example,
-.. `C <http://en.wikipedia.org/wiki/C_%28programming_language%29>`_ is
+.. `C <https://en.wikipedia.org/wiki/C_%28programming_language%29>`_ is
 .. typed, but very loosely (almost everything is an integer, or a
 .. variant thereof).  Moreover, the typing system does not allow the
 .. definition of trees or graphs without using pointers.
 
 在这两族语言出现之前的语言，有的有定型规则，有的则没有。大部分指令式语言\
-都没有丰富的类型系统。例如，`C <http://en.wikipedia.org/wiki/C_%28programming_language%29>`_
+都没有丰富的类型系统。例如，`C <https://en.wikipedia.org/wiki/C_%28programming_language%29>`_
 带有类型，但非常宽松（几乎一切都是整数或其变体）。此外，其定型系统必须用指针才能定义树或图。
 
 .. All these languages are examples of **partial languages**, i.e. the
@@ -201,7 +201,7 @@ Agda 和其它基于类型论的语言是\ **完全语言（Total Languages）**
 ~~~~~~~~~~~~~~
 
 .. Thanks to the `Curry-Howard
-.. correspondence <http://en.wikipedia.org/wiki/Curry_Howard>`_, one can
+.. correspondence <https://en.wikipedia.org/wiki/Curry_Howard>`_, one can
 .. express a logical specification using dependent types. Using only
 .. typing, it is for example possible to define
 
@@ -210,7 +210,7 @@ Agda 和其它基于类型论的语言是\ **完全语言（Total Languages）**
 .. * the type ``(n : Nat) -> (PrimRoot n)`` consisting of functions
 ..   computing primitive root in modular arithmetic.
 
-感谢`柯里-霍华德对应 <http://en.wikipedia.org/wiki/Curry_Howard>`_，\
+感谢`柯里-霍华德对应 <https://en.wikipedia.org/wiki/Curry_Howard>`_，\
 我们可以用依赖类型表达逻辑规范。只使用类型，我们就能定义
 
 * 自然数的相等性

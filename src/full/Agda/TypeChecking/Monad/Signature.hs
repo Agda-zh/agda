@@ -5,9 +5,6 @@ module Agda.TypeChecking.Monad.Signature where
 
 import Prelude hiding (null)
 
-import Control.Arrow (first, second, (***))
-import Control.Applicative hiding (empty)
-
 import qualified Control.Monad.Fail as Fail
 
 import Control.Monad.State
@@ -18,10 +15,9 @@ import Control.Monad.Trans.Maybe
 import qualified Data.List as List
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Map (Map)
 import qualified Data.Map as Map
+import qualified Data.HashMap.Strict as HMap
 import Data.Maybe
-import Data.Monoid
 
 import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Abstract (Ren, ScopeCopyInfo(..))
@@ -35,7 +31,6 @@ import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Monad.Debug
 import Agda.TypeChecking.Monad.Context
-import Agda.TypeChecking.Monad.Options
 import Agda.TypeChecking.Monad.Env
 import Agda.TypeChecking.Monad.Mutual
 import Agda.TypeChecking.Monad.Open
@@ -45,12 +40,15 @@ import Agda.TypeChecking.DropArgs
 import Agda.TypeChecking.Warnings
 import Agda.TypeChecking.Positivity.Occurrence
 import Agda.TypeChecking.Substitute
-import {-# SOURCE #-} Agda.TypeChecking.Telescope
 import Agda.TypeChecking.CompiledClause
 import Agda.TypeChecking.Coverage.SplitTree
 import {-# SOURCE #-} Agda.TypeChecking.CompiledClause.Compile
 import {-# SOURCE #-} Agda.TypeChecking.Polarity
 import {-# SOURCE #-} Agda.TypeChecking.ProjectionLike
+
+import {-# SOURCE #-} Agda.Compiler.Treeless.Erase
+
+import {-# SOURCE #-} Agda.Main
 
 import Agda.Utils.Either
 import Agda.Utils.Except ( ExceptT )
@@ -58,14 +56,11 @@ import Agda.Utils.Functor
 import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.ListT
-import Agda.Utils.Map as Map
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Null
-import Agda.Utils.Permutation
 import Agda.Utils.Pretty
 import Agda.Utils.Size
-import qualified Agda.Utils.HashMap as HMap
 
 import Agda.Utils.Impossible
 
@@ -132,7 +127,25 @@ mkPragma s = CompilerPragma <$> getCurrentRange <*> pure s
 
 -- | Add a compiler pragma `{-\# COMPILE <backend> <name> <text> \#-}`
 addPragma :: BackendName -> QName -> String -> TCM ()
-addPragma b q s = modifySignature . updateDefinition q . addCompilerPragma b =<< mkPragma s
+addPragma b q s = ifM erased
+  {- then -} (warning $ PragmaCompileErased b q)
+  {- else -} $ do
+    pragma <- mkPragma s
+    modifySignature $ updateDefinition q $ addCompilerPragma b pragma
+
+  where
+
+  erased :: TCM Bool
+  erased = do
+    def <- theDef <$> getConstInfo q
+    case def of
+      -- If we have a defined symbol, we check whether it is erasable
+      Function{} ->
+        locallyTC      eActiveBackendName (const $ Just b) $
+        locallyTCState stBackends         (const $ builtinBackends) $
+        isErasable q
+     -- Otherwise (Axiom, Datatype, Record type, etc.) we keep it
+      _ -> pure False
 
 getUniqueCompilerPragma :: BackendName -> QName -> TCM (Maybe CompilerPragma)
 getUniqueCompilerPragma backend q = do
@@ -251,7 +264,7 @@ addDisplayForms x = do
           case unSpine <$> body of
             Just (Def y es) -> do
               let df = Display m es $ DTerm $ Def top $ map Apply args
-              reportSLn "tc.display.section" 20 $ unlines
+              reportS "tc.display.section" 20
                 [ "adding display form " ++ prettyShow y ++ " --> " ++ prettyShow top
                 , show df
                 ]
@@ -262,7 +275,7 @@ addDisplayForms x = do
         [] | Constructor{ conSrcCon = h } <- theDef def -> do
               let y  = conName h
                   df = Display 0 [] $ DTerm $ Con (h {conName = top }) ConOSystem []
-              reportSLn "tc.display.section" 20 $ unlines
+              reportS "tc.display.section" 20
                 [ "adding display form " ++ prettyShow y ++ " --> " ++ prettyShow top
                 , show df
                 ]
@@ -794,16 +807,21 @@ getCompiled q = do
     Function{ funTreeless = t } -> t
     _                           -> Nothing
 
+-- | Returns a list of length 'conArity'.
+--   If no erasure analysis has been performed yet, this will be a list of 'False's.
 getErasedConArgs :: QName -> TCM [Bool]
 getErasedConArgs q = do
   def <- getConstInfo q
   case theDef def of
-    Constructor{ conData = d, conPars = np, conErased = es } -> return es
+    Constructor{ conArity, conErased } -> return $
+      fromMaybe (replicate conArity False) conErased
     _ -> __IMPOSSIBLE__
 
 setErasedConArgs :: QName -> [Bool] -> TCM ()
 setErasedConArgs q args = modifyGlobalDefinition q $ updateTheDef $ \case
-    def@Constructor{} -> def{ conErased = args }
+    def@Constructor{ conArity }
+      | length args == conArity -> def{ conErased = Just args }
+      | otherwise               -> __IMPOSSIBLE__
     def -> def   -- no-op for non-constructors
 
 getTreeless :: QName -> TCM (Maybe TTerm)
@@ -913,7 +931,7 @@ moduleParamsToApply m = do
   sub <- getModuleParameterSub m
   verboseS "tc.sig.param" 60 $ do
     cxt <- getContext
-    reportSLn "tc.sig.param" 60 $ unlines $
+    reportS "tc.sig.param" 60 $
       [ "  n    = " ++ show n
       , "  cxt  = " ++ show (map (fmap fst) cxt)
       , "  sub  = " ++ show sub
@@ -1077,11 +1095,11 @@ typeOfConst q = defType <$> (instantiateDef =<< getConstInfo q)
 
 -- | Get relevance of a constant.
 relOfConst :: QName -> TCM Relevance
-relOfConst q = defRelevance <$> getConstInfo q
+relOfConst q = getRelevance <$> getConstInfo q
 
 -- | Get modality of a constant.
 modalityOfConst :: QName -> TCM Modality
-modalityOfConst q = getModality . defArgInfo <$> getConstInfo q
+modalityOfConst q = getModality <$> getConstInfo q
 
 -- | The number of dropped parameters for a definition.
 --   0 except for projection(-like) functions and constructors.

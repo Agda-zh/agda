@@ -13,8 +13,6 @@ import qualified Data.IntMap as IntMap
 import Data.IntMap (IntMap)
 import qualified Data.IntSet as IntSet
 import Data.IntSet (IntSet)
-import qualified Data.Set as Set
-import Data.Set (Set)
 import Data.Traversable (traverse)
 
 import Agda.Syntax.Common
@@ -44,7 +42,7 @@ forceNotFree xs a = do
   -- Initially, all variables are marked as `NotFree`. This is changed
   -- to `MaybeFree` when we find an occurrence.
   let mxs = IntMap.fromSet (const NotFree) xs
-  (a, mxs) <- runStateT (runReaderT (forceNotFreeR $ precomputeFreeVars_ a) Set.empty) mxs
+  (a, mxs) <- runStateT (runReaderT (forceNotFreeR $ precomputeFreeVars_ a) mempty) mxs
   return (mxs, a)
 
 type MonadFreeRed m =
@@ -121,7 +119,7 @@ instance ForceNotFree Term where
       Var x <$> forceNotFree' es
     Def f es   -> Def f    <$> forceNotFree' es
     Con c h es -> Con c h  <$> forceNotFree' es
-    MetaV x es -> local (Set.insert x) $
+    MetaV x es -> local (insertMetaSet x) $
                   MetaV x  <$> forceNotFree' es
     Lam h b    -> Lam h    <$> forceNotFree' b
     Pi a b     -> Pi       <$> forceNotFree' a <*> forceNotFree' b  -- Dom and Abs do reduceIf so not needed here
@@ -141,7 +139,7 @@ instance ForceNotFree PlusLevel where
 
 instance ForceNotFree LevelAtom where
   forceNotFree' l = case l of
-    MetaLevel x es   -> local (Set.insert x) $
+    MetaLevel x es   -> local (insertMetaSet x) $
                         MetaLevel x    <$> forceNotFree' es
     BlockedLevel x t -> BlockedLevel x <$> forceNotFree' t
     NeutralLevel b t -> NeutralLevel b <$> forceNotFree' t

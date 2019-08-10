@@ -51,6 +51,10 @@ See :ref:`compilers` for backend-specific options.
 :samp:`--no-forcing`
       Disable the forcing optimisation
 
+:samp:`--with-compiler={PATH}`
+      Set :samp:`PATH` as the executable to call to compile
+      the backend's output (default: ghc for the GHC backend).
+
 Generating highlighted source code
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -402,6 +406,8 @@ Individual warnings can be turned on and off by ``-W {Name}`` and ``-W
       Polarity pragmas for non-postulates.
 :samp:`PragmaCompiled`
       ``COMPILE`` pragmas not allowed in safe mode.
+:samp:`PragmaCompileErased`
+      ``COMPILE`` pragma targeting an erased symbol.
 :samp:`PragmaNoTerminationCheck`
       ``NO_TERMINATION_CHECK`` pragmas are deprecated.
 :samp:`RewriteMaybeNonConfluent`
@@ -526,5 +532,5 @@ again, the source file is re-typechecked instead:
 * ``--warning``
 
 
-.. _Vim: http://www.vim.org/
+.. _Vim: https://www.vim.org/
 .. _Dot: http://www.graphviz.org/content/dot-language

@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP                        #-}
 -- | Collecting fixity declarations (and polarity pragmas) for concrete
 --   declarations.
 module Agda.Syntax.Concrete.Fixity
@@ -12,9 +13,10 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+#if __GLASGOW_HASKELL__ < 804
 import Data.Semigroup
+#endif
 
-import Agda.Syntax.Common
 import Agda.Syntax.Position
 import Agda.Syntax.Fixity
 import Agda.Syntax.Notation
@@ -154,6 +156,7 @@ fixitiesAndPolarities' = foldMap $ \ d -> case d of
   -- We expand these boring cases to trigger a revisit
   -- in case the @Declaration@ type is extended in the future.
   TypeSig     {}  -> mempty
+  FieldSig    {}  -> mempty
   Generalize  {}  -> mempty
   Field       {}  -> mempty
   FunClause   {}  -> mempty
@@ -174,7 +177,7 @@ fixitiesAndPolarities' = foldMap $ \ d -> case d of
   UnquoteDef  {}  -> mempty
   Pragma      {}  -> mempty
 
-data DeclaredNames = DeclaredNames { allNames, postulates, privateNames :: Set Name }
+data DeclaredNames = DeclaredNames { _allNames, _postulates, _privateNames :: Set Name }
 
 instance Semigroup DeclaredNames where
   DeclaredNames xs ps as <> DeclaredNames ys qs bs =
@@ -201,7 +204,8 @@ declaresName x = declaresNames [x]
 declaredNames :: Declaration -> DeclaredNames
 declaredNames d = case d of
   TypeSig _ x _        -> declaresName x
-  Field _ x _          -> declaresName x
+  FieldSig _ x _       -> declaresName x
+  Field _ fs           -> foldMap declaredNames fs
   FunClause (LHS p [] []) _ _ _
     | IdentP (QName x) <- removeSingletonRawAppP p
                        -> declaresName x

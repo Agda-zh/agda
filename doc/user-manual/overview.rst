@@ -25,15 +25,15 @@
 本手册涵盖了 Agda 编程语言、类型检查、代码补全、编辑系统及相关资源和工具的内容。
 
 .. You can find a lot of useful resources on `Agda Wiki
-.. <http://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.HomePage>`_
+.. <https://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.HomePage>`_
 .. site, like `tutorials, introductions, publications and books
-.. <http://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.Documentation>`_.
+.. <https://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.Documentation>`_.
 .. If you're new to Agda, you should make use of the resources on Agda Wiki
 .. and chapter :ref:`getting-started` instead of chapter :ref:`language-index`.
 
-你可以在 `Agda Wiki <http://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.HomePage>`_
+你可以在 `Agda Wiki <https://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.HomePage>`_
 上找到大量有用的资源，包括 `教程、介绍、出版物和书籍
-<http://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.Documentation>`_。
+<https://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.Documentation>`_。
 如果你是 Agda 新手，那么请使用 Agda Wiki 和 :ref:`getting-started`
 上的内容而非直接阅读 :ref:`language-index`.
 

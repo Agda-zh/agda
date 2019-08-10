@@ -10,7 +10,7 @@ module Agda.TypeChecking.Rules.Application
 
 import Prelude hiding ( null )
 
-import Control.Arrow (first, second)
+import Control.Arrow (first)
 import Control.Monad.Trans
 import Control.Monad.Trans.Maybe
 import Control.Monad.Reader
@@ -38,6 +38,7 @@ import Agda.TypeChecking.Conversion
 import Agda.TypeChecking.Constraints
 import Agda.TypeChecking.Datatypes
 import Agda.TypeChecking.Free
+import Agda.TypeChecking.Free.Lazy (VarMap, lookupVarMap)
 import Agda.TypeChecking.Implicit
 import Agda.TypeChecking.Injectivity
 import Agda.TypeChecking.Irrelevance
@@ -259,8 +260,17 @@ inferHead e = do
         ]
       unless (usableRelevance a) $
         typeError $ VariableIsIrrelevant x
-      unless (usableQuantity a) $
+      -- Andreas, 2019-06-18, LAIM 2019, issue #3855:
+      -- Conor McBride style quantity judgement:
+      -- The available quantity for variable x must be below
+      -- the required quantity to construct the term x.
+      -- Note: this whole thing does not work for linearity, where we need some actual arithmetics.
+      unlessM ((getQuantity a `moreQuantity`) <$> asksTC getQuantity) $
         typeError $ VariableIsErased x
+
+      unless (usableCohesion a) $
+        typeError $ VariableIsOfUnusableCohesion x (getCohesion a)
+
       return (applyE u, unDom a)
 
     A.Def x -> inferHeadDef ProjPrefix x
@@ -300,8 +310,9 @@ inferDef mkTerm x =
     -- getConstInfo retrieves the *absolute* (closed) type of x
     -- instantiateDef relativizes it to the current context
     d  <- instantiateDef =<< getConstInfo x
-    -- irrelevant defs are only allowed in irrelevant position
-    checkRelevance x d
+    -- Irrelevant defs are only allowed in irrelevant position.
+    -- Erased defs are only allowed in erased position (see #3855).
+    checkModality x d
     case theDef d of
       GeneralizableVar{} -> do
         -- Generalizable variables corresponds to metas created
@@ -319,6 +330,13 @@ inferDef mkTerm x =
         vs <- freeVarsToApply x
         let t = defType d
             v = mkTerm vs -- applies x to vs, dropping parameters
+
+        -- Andrea 2019-07-16, Check that the supplied arguments
+        -- respect the cohesion modalities of the current context.
+        -- Cohesion is purely based on left-division, so it does not
+        -- rely on "position" like Relevance/Quantity.
+        checkCohesionArgs vs
+
         debug vs t v
         return (v, t)
   where
@@ -331,22 +349,38 @@ inferDef mkTerm x =
         , nest 2 $ ":" <+> prettyTCM t
         , nest 2 $ "-->" <+> prettyTCM v ]
 
--- | The second argument is the definition of the first.
-checkRelevance :: QName -> Definition -> TCM ()
-checkRelevance x def = maybe (return ()) typeError =<< checkRelevance' x def
+checkCohesionArgs :: Args -> TCM ()
+checkCohesionArgs vs = do
+  let
+    vmap :: VarMap
+    vmap = freeVars vs
+
+  -- we iterate over all vars in the context and their ArgInfo,
+  -- checking for each that "vs" uses them as allowed.
+  as <- getContextArgs
+  forM_ as $ \ (Arg avail t) -> do
+    let m = do
+          v <- deBruijnView t
+          varModality <$> lookupVarMap v vmap
+    whenJust m $ \ used -> do
+        unless (getCohesion avail `moreCohesion` getCohesion used) $
+           (genericDocError =<<) $ fsep $
+                ["Variable" , prettyTCM t]
+             ++ pwords "is used as" ++ [text $ show $ getCohesion used]
+             ++ pwords "but only available as" ++ [text $ show $ getCohesion avail]
 
 -- | The second argument is the definition of the first.
 --   Returns 'Nothing' if ok, otherwise the error message.
 checkRelevance' :: QName -> Definition -> TCM (Maybe TypeError)
 checkRelevance' x def = do
-  case defRelevance def of
+  case getRelevance def of
     Relevant -> return Nothing -- relevance functions can be used in any context.
     drel -> do
       -- Andreas,, 2018-06-09, issue #2170
       -- irrelevant projections are only allowed if --irrelevant-projections
       ifM (return (isJust $ isProjection_ $ theDef def) `and2M`
            (not .optIrrelevantProjections <$> pragmaOptions)) {-then-} needIrrProj {-else-} $ do
-        rel <- asksTC envRelevance
+        rel <- asksTC getRelevance
         reportSDoc "tc.irr" 50 $ vcat
           [ "declaration relevance =" <+> text (show drel)
           , "context     relevance =" <+> text (show rel)
@@ -358,6 +392,32 @@ checkRelevance' x def = do
         , " Turn on option --irrelevant-projections to use it (unsafe)."
         ]
 
+-- | The second argument is the definition of the first.
+--   Returns 'Nothing' if ok, otherwise the error message.
+checkQuantity' :: QName -> Definition -> TCM (Maybe TypeError)
+checkQuantity' x def = do
+  case getQuantity def of
+    Quantityω{} -> return Nothing -- Abundant definitions can be used in any context.
+    dq -> do
+      q <- asksTC getQuantity
+      reportSDoc "tc.irr" 50 $ vcat
+        [ "declaration quantity =" <+> text (show dq)
+        , "context     quantity =" <+> text (show q)
+        ]
+      return $ if (dq `moreQuantity` q) then Nothing else Just $ DefinitionIsErased x
+
+-- | The second argument is the definition of the first.
+checkModality' :: QName -> Definition -> TCM (Maybe TypeError)
+checkModality' x def = do
+  checkRelevance' x def >>= \case
+    Nothing    -> checkQuantity' x def
+    err@Just{} -> return err
+
+-- | The second argument is the definition of the first.
+checkModality :: QName -> Definition -> TCM ()
+checkModality x def = justToError $ checkModality' x def
+  where
+  justToError m = maybe (return ()) typeError =<< m
 
 -- | @checkHeadApplication e t hd args@ checks that @e@ has type @t@,
 -- assuming that @e@ has the form @hd args@. The corresponding
@@ -379,6 +439,7 @@ checkHeadApplication cmp e t hd args = do
   pHComp <- getNameOfConstrained builtinHComp
   pTrans <- getNameOfConstrained builtinTrans
   mglue  <- getNameOfConstrained builtin_glue
+  mglueU  <- getNameOfConstrained builtin_glueU
   case hd of
     -- Type checking #. The # that the user can write will be a Def, but the
     -- sharp we generate in the body of the wrapper is a Con.
@@ -391,6 +452,7 @@ checkHeadApplication cmp e t hd args = do
     A.Def c | Just c == conId -> defaultResult' $ Just $ checkConId c
     A.Def c | Just c == pOr   -> defaultResult' $ Just $ checkPOr c
     A.Def c | Just c == mglue -> defaultResult' $ Just $ check_glue c
+    A.Def c | Just c == mglueU -> defaultResult' $ Just $ check_glueU c
 
     _ -> defaultResult
   where
@@ -479,7 +541,8 @@ checkArgumentsE' chk exh r args0@(arg@(Arg info e) : args) t0 mt1 =
         ]
       -- First, insert implicit arguments, depending on current argument @arg@.
       let hx = getHiding info  -- hiding of current argument
-          mx = fmap rangedThing $ nameOf e -- name of current argument
+          mx :: Maybe ArgName
+          mx = bareNameOf e    -- name of current argument
           -- do not insert visible arguments
           expand NotHidden y = False
           -- insert a hidden argument if arg is not hidden or has different name
@@ -515,7 +578,7 @@ checkArgumentsE' chk exh r args0@(arg@(Arg info e) : args) t0 mt1 =
               | null xs        = lift $ typeError $ ShouldBePi t0'
               -- c) We did insert implicits, but we ran out of implicit function types.
               --    Then, we should inform the user that we did not find his one.
-              | otherwise      = lift $ typeError $ WrongNamedArgument arg
+              | otherwise      = lift $ typeError $ WrongNamedArgument arg xs
 
         -- 2. We have a function type left, but it is the wrong one.
         --    Our argument must be implicit, case a) is impossible.
@@ -524,7 +587,7 @@ checkArgumentsE' chk exh r args0@(arg@(Arg info e) : args) t0 mt1 =
               -- b) We have not inserted any implicits.
               | null xs   = lift $ typeError $ WrongHidingInApplication t0'
               -- c) We inserted implicits, but did not find his one.
-              | otherwise = lift $ typeError $ WrongNamedArgument arg
+              | otherwise = lift $ typeError $ WrongNamedArgument arg xs
 
         viewPath <- lift pathView'
 
@@ -575,9 +638,9 @@ checkArgumentsE' chk exh r args0@(arg@(Arg info e) : args) t0 mt1 =
         -- t0' <- lift $ forcePi (getHiding info) (maybe "_" rangedThing $ nameOf e) t0'
         case unEl t0' of
           Pi (Dom{domInfo = info', domName = dname, unDom = a}) b
-            | let name = maybe "_" rangedThing dname,
+            | let name = bareNameWithDefault "_" dname,
               sameHiding info info'
-              && (visible info || maybe True ((name ==) . rangedThing) (nameOf e)) -> do
+              && (visible info || maybe True (name ==) mx) -> do
                 u <- lift $ applyModalityToContext info' $ do
                  -- Andreas, 2014-05-30 experiment to check non-dependent arguments
                  -- after the spine has been processed.  Allows to propagate type info
@@ -763,7 +826,7 @@ checkConstructorApplication cmp org t c args = do
         Just ps' <- unnamedPar h ps = dropArgs ps' args'
       | otherwise                   = args
       where
-        name = fmap rangedThing . nameOf $ unArg arg
+        name = bareNameOf arg
         h    = getHiding arg
 
         namedPar   x = dropPar ((x ==) . unDom)
@@ -793,7 +856,7 @@ disambiguateConstructor cs0 t = do
   case cons of
     []    -> typeError $ AbstractConstructorNotInScope $ headNe cs0
     [con] -> do
-      let c = setConName (fromMaybe __IMPOSSIBLE__ $ headMaybe cs) con
+      let c = setConName (headWithDefault __IMPOSSIBLE__ cs) con
       reportSLn "tc.check.term.con" 40 $ "  only one non-abstract constructor: " ++ prettyShow c
       storeDisambiguatedName $ conName c
       return (Right c)
@@ -801,7 +864,7 @@ disambiguateConstructor cs0 t = do
       dcs <- zipWithM (\ c con -> (, setConName c con) . getData . theDef <$> getConInfo con) cs cons
       -- Type error
       let badCon t = typeError $ flip DoesNotConstructAnElementOf t $
-            fromMaybe __IMPOSSIBLE__ $ headMaybe cs
+            headWithDefault __IMPOSSIBLE__ cs
       -- Lets look at the target type at this point
       let getCon :: TCM (Maybe ConHead)
           getCon = do
@@ -998,7 +1061,7 @@ inferOrCheckProjAppToKnownPrincipalArg e o ds args mt k v0 ta = do
             -- the correct disambiguation.
             -- guard (size tel == size pars)
 
-            guard =<< do isNothing <$> do lift $ checkRelevance' d def
+            guard =<< do isNothing <$> do lift $ checkModality' d def
             return (orig, (d, (pars, (dom, u, tb))))
 
       cands <- groupOn fst . catMaybes <$> mapM (runMaybeT . try) (toList ds)
@@ -1080,7 +1143,7 @@ checkSharpApplication e t c args = do
                            (freshName_ name)
 
     -- Define and type check the fresh function.
-    rel <- asksTC envRelevance
+    mod <- asksTC getModality
     abs <- aModeToDef <$> asksTC envAbstractMode
     let info   = A.mkDefInfo (A.nameConcrete $ A.qnameName c') noFixity'
                              PublicAccess abs noRange
@@ -1094,9 +1157,10 @@ checkSharpApplication e t c args = do
     i <- currentOrFreshMutualBlock
 
     -- If we are in irrelevant position, add definition irrelevantly.
+    -- If we are in erased position, add definition as erased.
     -- TODO: is this sufficient?
     addConstant c' =<< do
-      let ai = setRelevance rel defaultArgInfo
+      let ai = setModality mod defaultArgInfo
       useTerPragma $
         (defaultDefn ai c' forcedType emptyFunction)
         { defMutual = i }
@@ -1107,7 +1171,7 @@ checkSharpApplication e t c args = do
       def <- theDef <$> getConstInfo c'
       vcat $
         [ "The coinductive wrapper"
-        , nest 2 $ prettyTCM rel <> (prettyTCM c' <+> ":")
+        , nest 2 $ prettyTCM mod <> (prettyTCM c' <+> ":")
         , nest 4 $ prettyTCM t
         , nest 2 $ prettyA clause
         , ("The definition is" <+> text (show $ funDelayed def)) <>
@@ -1268,7 +1332,7 @@ checkPOr c rs vs _ = do
 --              → {T : Partial φ (Set ℓ')} → {e : PartialP φ (λ o → T o ≃ A)}
 --              → (t : PartialP φ T) → (a : A) → primGlue A T e@
 --
---   Check   @φ ⊢ a = t 1=1@  or actually the equivalent:  @(\ _ → a) = t : PartialP φ T@
+--   Check   @φ ⊢ a = e 1=1 (t 1=1)@  or actually the equivalent:  @(\ _ → a) = (\ o -> e o (t o)) : PartialP φ A@
 check_glue :: QName -> MaybeRanges -> Args -> Type -> TCM Args
 check_glue c rs vs _ = do
   case vs of
@@ -1286,4 +1350,32 @@ check_glue c rs vs _ = do
       ta <- el' (pure $ unArg la) (pure $ unArg bA)
       a <- blockArg ta (rs !!! 7) a $ equalTerm ty a' v
       return $ la : lb : bA : phi : bT : e : t : a : rest
+   _ -> typeError $ GenericError $ show c ++ " must be fully applied"
+
+
+-- | @prim^glueU : ∀ {ℓ} {φ : I}
+--              → {T : I → Partial φ (Set ℓ)} → {A : Set ℓ [ φ ↦ T i0 ]}
+--              → (t : PartialP φ (T i1)) → (a : outS A) → hcomp T (outS A)@
+--
+--   Check   @φ ⊢ a = transp (\ i -> T 1=1 (~ i)) i0 (t 1=1)@  or actually the equivalent:
+--           @(\ _ → a) = (\o -> transp (\ i -> T o (~ i)) i0 (t o)) : PartialP φ (T i0)@
+check_glueU :: QName -> MaybeRanges -> Args -> Type -> TCM Args
+check_glueU c rs vs _ = do
+  case vs of
+   -- WAS: [la, lb, bA, phi, bT, e, t, a] -> do
+   la : phi : bT : bA : t : a : rest -> do
+      let iinfo = setRelevance Irrelevant defaultArgInfo
+      v <- runNamesT [] $ do
+            [la, phi, bT, bA, t] <- mapM (open . unArg) [la, phi, bT, bA, t]
+            let f o = cl primTrans <#> (lam "i" $ const la) <@> (lam "i" $ \ i -> bT <@> (cl primINeg <@> i) <..> o) <@> cl primIZero
+            glam iinfo "o" $ \ o -> f o <@> (t <..> o)
+      ty <- runNamesT [] $ do
+            [la, phi, bT] <- mapM (open . unArg) [la, phi, bT]
+            pPi' "o" phi $ \ o -> el' la (bT <@> cl primIZero <..> o)
+      let a' = Lam iinfo (NoAbs "o" $ unArg a)
+      ta <- runNamesT [] $ do
+            [la, phi, bT, bA] <- mapM (open . unArg) [la, phi, bT, bA]
+            el' la (cl primSubOut <#> (cl primLevelSuc <@> la) <#> (Sort . tmSort <$> la) <#> phi <#> (bT <@> cl primIZero) <@> bA)
+      a <- blockArg ta (rs !!! 5) a $ equalTerm ty a' v
+      return $ la : phi : bT : bA : t : a : rest
    _ -> typeError $ GenericError $ show c ++ " must be fully applied"

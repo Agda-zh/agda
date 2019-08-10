@@ -17,25 +17,18 @@ module Agda.TypeChecking.Coverage
 
 import Prelude hiding (null, (!!))  -- do not use partial functions like !!
 
-import Control.Arrow (second)
-
 import Control.Monad
-import Control.Monad.Reader
 import Control.Monad.Trans ( lift )
 
-import Data.Either (lefts)
 import Data.Foldable (for_)
 import qualified Data.List as List
-import Data.Monoid (Any(..))
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import qualified Data.Traversable as Trav
 
 import Agda.Syntax.Common
 import Agda.Syntax.Position
-import Agda.Syntax.Literal
 import Agda.Syntax.Internal
 import Agda.Syntax.Internal.Pattern
 
@@ -52,12 +45,10 @@ import Agda.TypeChecking.Rules.LHS.Unify
 import Agda.TypeChecking.Coverage.Match
 import Agda.TypeChecking.Coverage.SplitTree
 
-import Agda.TypeChecking.Conversion (tryConversion, equalType, equalTermOnFace)
+import Agda.TypeChecking.Conversion (tryConversion, equalType)
 import Agda.TypeChecking.Datatypes (getConForm)
 import {-# SOURCE #-} Agda.TypeChecking.Empty ( checkEmptyTel, isEmptyTel, isEmptyType )
-import Agda.TypeChecking.Free
 import Agda.TypeChecking.Irrelevance
-import Agda.TypeChecking.Patterns.Internal (dotPatternsToPatterns)
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Reduce
@@ -72,10 +63,9 @@ import Agda.Interaction.Options
 import Agda.Utils.Either
 import Agda.Utils.Except
   ( ExceptT
-  , MonadError(catchError, throwError)
+  , MonadError(throwError)
   , runExceptT
   )
-import Agda.Utils.Function
 import Agda.Utils.Functor
 import Agda.Utils.List
 import Agda.Utils.Maybe
@@ -84,8 +74,6 @@ import Agda.Utils.Null
 import Agda.Utils.Permutation
 import Agda.Utils.Pretty (prettyShow)
 import Agda.Utils.Size
-import Agda.Utils.Tuple
-import Agda.Utils.Lens
 
 import Agda.Utils.Impossible
 
@@ -191,7 +179,7 @@ coverageCheck f t cs = do
       ]
 
   -- used = actually used clauses for cover
-  -- pss  = uncovered cases
+  -- pss  = non-covered cases
   CoverResult splitTree used pss qss noex <- cover f cs sc
 
   -- Andreas, 2018-11-12, issue #378:
@@ -211,7 +199,7 @@ coverageCheck f t cs = do
     ]
   reportSDoc "tc.cover.covering" 10 $ vcat
     [ text $ "covering patterns for " ++ prettyShow f
-    , nest 2 $ vcat $ map (\cl -> enterClosure cl $ \ cl -> addContext (clauseTel cl) $ prettyTCMPatternList $ namedClausePats cl) qss
+    , nest 2 $ vcat $ map (\ cl -> addContext (clauseTel cl) $ prettyTCMPatternList $ namedClausePats cl) qss
     ]
 
   -- Storing the covering clauses so that checkIApplyConfluence_ can
@@ -280,8 +268,8 @@ coverageCheck f t cs = do
   unless (null is) $ do
     -- Warn about unreachable clauses.
     let unreached = filter ((Just True ==) . clauseUnreachable) cs1
-    setCurrentRange (map clauseFullRange unreached) $
-      warning $ UnreachableClauses f $ map namedClausePats unreached
+    let ranges    = map clauseFullRange unreached
+    setCurrentRange ranges $ warning $ UnreachableClauses f ranges
 
   -- report a warning if there are clauses that are not preserved as
   -- definitional equalities and --exact-split is enabled
@@ -302,9 +290,8 @@ data CoverResult = CoverResult
   { coverSplitTree       :: SplitTree
   , coverUsedClauses     :: Set Nat
   , coverMissingClauses  :: [(Telescope, [NamedArg DeBruijnPattern])]
-  , coverPatterns        :: [Closure Clause]
+  , coverPatterns        :: [Clause]
   -- ^ The set of patterns used as cover.
-  -- Entering the closure puts you directly in the right context (and cps) for the RHS.
   , coverNoExactClauses  :: Set Nat
   }
 
@@ -354,7 +341,7 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
 
     -- We need to split!
     -- If all clauses have an unsplit copattern, we try that first.
-    Block res bs -> trySplitRes res (null bs) $ do
+    Block res bs -> trySplitRes res (null bs) splitError $ do
       when (null bs) __IMPOSSIBLE__
       -- Otherwise, if there are variables to split, we try them
       -- in the order determined by a split strategy.
@@ -367,20 +354,36 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
       -- If this fails, try to at least carry out the splitting to the end.
       continue xs NoAllowPartialCover $ \ _err -> do
         continue xs YesAllowPartialCover $ \ err -> do
-          typeError $ SplitError err
+          splitError err
   where
-    applyCl :: SplitClause -> Clause -> [(Nat, SplitPattern)] -> TCM (Closure Clause)
-    applyCl SClause{scTel = tel, scCheckpoints = cps} cl mps
-      = addContext tel
-        $ locallyTC eCheckpoints (const cps)
-        $ checkpoint IdS $ do
+    -- Andreas, 2019-08-07, issue #3966
+    -- | When we get a SplitError, tighten the error Range to the clauses
+    -- that are still candidates for covering the SplitClause.
+    splitError :: SplitError -> TCM a
+    splitError = withRangeOfCandidateClauses . typeError . SplitError
+
+    -- | This repeats the matching, but since we are crashing anyway,
+    -- the extra work just to compute a better Range does not matter.
+    withRangeOfCandidateClauses :: TCM a -> TCM a
+    withRangeOfCandidateClauses cont = do
+      cands <- mapMaybe (uncurry notNo) . zip cs <$> mapM (matchClause ps) cs
+      setCurrentRange cands cont
+      where
+        notNo :: Clause -> Match a -> Maybe Clause
+        notNo c = \case
+          Yes{}   -> Just c
+          Block{} -> Just c
+          No{}    -> Nothing
+
+    applyCl :: SplitClause -> Clause -> [(Nat, SplitPattern)] -> TCM Clause
+    applyCl SClause{scTel = tel, scCheckpoints = cps} cl mps = addContext tel $ do
         reportSDoc "tc.cover.applyCl" 40 $ "applyCl"
         reportSDoc "tc.cover.applyCl" 40 $ "tel    =" <+> prettyTCM tel
         reportSDoc "tc.cover.applyCl" 40 $ "ps     =" <+> pretty (namedClausePats cl)
         reportSDoc "tc.cover.applyCl" 40 $ "mps    =" <+> pretty mps
         reportSDoc "tc.cover.applyCl" 40 $ "s      =" <+> pretty s
         reportSDoc "tc.cover.applyCl" 40 $ "new ps =" <+> pretty (s `applySubst` namedClausePats cl)
-        buildClosure $
+        return $
              Clause { clauseLHSRange  = clauseLHSRange cl
                     , clauseFullRange = clauseFullRange cl
                     , clauseTel       = tel
@@ -454,20 +457,21 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
     trySplitRes
       :: BlockedOnResult -- ^ Are we blocked on the result?
       -> Bool            -- ^ Is this the last thing we try?
+      -> (SplitError -> TCM CoverResult) -- ^ Handler for 'SplitError'
       -> TCM CoverResult -- ^ Continuation
       -> TCM CoverResult
     -- not blocked on result: try regular splits
-    trySplitRes NotBlockedOnResult finalSplit cont
+    trySplitRes NotBlockedOnResult finalSplit splitError cont
       | finalSplit = __IMPOSSIBLE__ -- there must be *some* reason we are blocked
       | otherwise  = cont
     -- blocked on arguments that are not yet introduced:
 
     -- we must split on a variable so that the target type becomes a pi type
-    trySplitRes (BlockedOnApply IsApply) finalSplit cont
+    trySplitRes (BlockedOnApply IsApply) finalSplit splitError cont
       | finalSplit = __IMPOSSIBLE__ -- already ruled out by lhs checker
       | otherwise  = cont
     -- ...or it was an IApply pattern, so we might just need to introduce the variable now.
-    trySplitRes (BlockedOnApply IsIApply) finalSplit cont
+    trySplitRes (BlockedOnApply IsIApply) finalSplit splitError cont
        = do
          caseMaybeM (splitResultPath f sc) fallback $ \ sc ->
                cover f cs . snd =<< fixTarget sc
@@ -478,17 +482,17 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
     -- try regular splits if there are any, or else throw an error,
     -- this is nicer than continuing and reporting unreachable clauses
     -- (see issue #2833)
-    trySplitRes (BlockedOnProj True) finalSplit cont
-      | finalSplit = typeError $ SplitError CosplitCatchall
+    trySplitRes (BlockedOnProj True) finalSplit splitError cont
+      | finalSplit = splitError CosplitCatchall
       | otherwise  = cont
     -- all clauses have an unsplit copattern: try to split
-    trySplitRes (BlockedOnProj False) finalSplit cont = do
+    trySplitRes (BlockedOnProj False) finalSplit splitError cont = do
       reportSLn "tc.cover" 20 $ "blocked by projection pattern"
       -- forM is a monadic map over a Maybe here
       mcov <- splitResultRecord f sc
       case mcov of
         Left err
-          | finalSplit -> typeError $ SplitError err
+          | finalSplit -> splitError err
           | otherwise  -> cont
         Right (Covering n scs) -> do
           -- If result splitting was successful, continue coverage checking.
@@ -788,27 +792,26 @@ inferMissingClause
        -- ^ Function name.
   -> SplitClause
        -- ^ Clause to add.  Clause hiding (in 'clauseType') must be 'Instance'.
-   -> TCM (Closure Clause)
+   -> TCM Clause
 inferMissingClause f (SClause tel ps _ cps (Just t)) = setCurrentRange f $ do
   reportSDoc "tc.cover.infer" 20 $ addContext tel $ "Trying to infer right-hand side of type" <+> prettyTCM t
-  cl <- addContext tel
-        $ locallyTC eCheckpoints (const cps)
-        $ checkpoint IdS $ do    -- introduce a fresh checkpoint
-    (_x, rhs) <- case getHiding t of
-                  Instance{} -> newInstanceMeta "" (unArg t)
-                  Hidden     -> __IMPOSSIBLE__
-                  NotHidden  -> __IMPOSSIBLE__
-    buildClosure $
-             Clause { clauseLHSRange  = noRange
-                    , clauseFullRange = noRange
-                    , clauseTel       = tel
-                    , namedClausePats = fromSplitPatterns ps
-                    , clauseBody      = Just rhs
-                    , clauseType      = Just t
-                    , clauseCatchall  = False
-                    , clauseUnreachable = Just False  -- missing, thus, not unreachable
-                    }
-  addClauses f [clValue cl]  -- Important: add at the end.
+  (_x, rhs) <- case getHiding t of
+    Instance{} -> addContext tel
+                   $ locallyTC eCheckpoints (const cps)
+                   $ checkpoint IdS    -- introduce a fresh checkpoint
+                   $ newInstanceMeta "" (unArg t)
+    Hidden     -> __IMPOSSIBLE__
+    NotHidden  -> __IMPOSSIBLE__
+  let cl = Clause { clauseLHSRange  = noRange
+                  , clauseFullRange = noRange
+                  , clauseTel       = tel
+                  , namedClausePats = fromSplitPatterns ps
+                  , clauseBody      = Just rhs
+                  , clauseType      = Just t
+                  , clauseCatchall  = False
+                  , clauseUnreachable = Just False  -- missing, thus, not unreachable
+                  }
+  addClauses f [cl]  -- Important: add at the end.
   return cl
 inferMissingClause _ (SClause _ _ _ _ Nothing) = __IMPOSSIBLE__
 
@@ -1054,8 +1057,7 @@ computeNeighbourhood delta1 n delta2 d pars ixs hix tel ps cps c = do
 
   let preserve (x, t@(El _ (Def d' _))) | d == d' = (n, t)
       preserve (x, t) = (x, t)
-      gammal = map (fmap preserve) . telToList $ gamma0
-      gamma  = telFromList gammal
+      gamma  = telFromList . map (fmap preserve) . telToList $ gamma0
       delta1Gamma = delta1 `abstract` gamma
 
   debugInit con ctype d pars ixs cixs delta1 delta2 gamma tel ps hix
@@ -1066,6 +1068,15 @@ computeNeighbourhood delta1 n delta2 d pars ixs hix tel ps cps c = do
   -- Unify constructor target and given type (in Δ₁Γ)
   let conIxs   = drop (size pars) cixs
       givenIxs = raise (size gamma) ixs
+
+  -- Andrea 2019-07-17 propagate the Cohesion to the equation telescope
+  -- TODO: should we propagate the modality in general?
+  -- See also LHS checking.
+  dtype <- do
+         let (_, Dom{domInfo = info} : _) = splitAt (size tel - hix - 1) (telToList tel)
+         let updCoh = composeCohesion (getCohesion info)
+         TelV dtel dt <- telView dtype
+         return $ abstract (mapCohesion updCoh <$> dtel) dt
 
   r <- unifyIndices
          delta1Gamma
@@ -1116,8 +1127,8 @@ computeNeighbourhood delta1 n delta2 d pars ixs hix tel ps cps c = do
       return $ Just $ SClause delta' ps' rho cps' Nothing -- target fixed later
 
   where
-    debugInit con ctype d pars ixs cixs delta1 delta2 gamma tel ps hix =
-      liftTCM $ reportSDoc "tc.cover.split.con" 20 $ vcat
+    debugInit con ctype d pars ixs cixs delta1 delta2 gamma tel ps hix = liftTCM $ do
+      reportSDoc "tc.cover.split.con" 20 $ vcat
         [ "computeNeighbourhood"
         , nest 2 $ vcat
           [ "context=" <+> (inTopContext . prettyTCM =<< getContextTelescope)
@@ -1131,6 +1142,24 @@ computeNeighbourhood delta1 n delta2 d pars ixs hix tel ps cps c = do
           , "delta1 =" <+> do inTopContext $ prettyTCM delta1
           , "delta2 =" <+> do inTopContext $ addContext delta1 $ addContext gamma $ prettyTCM delta2
           , "gamma  =" <+> do inTopContext $ addContext delta1 $ prettyTCM gamma
+          , "tel  =" <+> do inTopContext $ prettyTCM tel
+          , "hix    =" <+> text (show hix)
+          ]
+        ]
+      reportSDoc "tc.cover.split.con" 70 $ vcat
+        [ "computeNeighbourhood"
+        , nest 2 $ vcat
+          [ "context=" <+> (inTopContext . (text . show) =<< getContextTelescope)
+          , "con    =" <+> (text . show) con
+          , "ctype  =" <+> (text . show) ctype
+          , "ps     =" <+> (text . show) ps
+          , "d      =" <+> (text . show) d
+          , "pars   =" <+> (text . show) pars
+          , "ixs    =" <+> (text . show) ixs
+          , "cixs   =" <+> (text . show) cixs
+          , "delta1 =" <+> (text . show) delta1
+          , "delta2 =" <+> (text . show) delta2
+          , "gamma  =" <+> (text . show) gamma
           , "hix    =" <+> text (show hix)
           ]
         ]
@@ -1167,7 +1196,7 @@ computeNeighbourhood delta1 n delta2 d pars ixs hix tel ps cps c = do
 data FixTarget
   = YesFixTarget
   | NoFixTarget
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | Allow partial covering for split?
 data AllowPartialCover
@@ -1284,8 +1313,9 @@ split' checkEmpty ind allowPartialCover fixtarget
           NoCheckEmpty -> pure cons'
         mns  <- forM cons $ \ con -> fmap (SplitCon con,) <$>
           computeNeighbourhood delta1 n delta2 d pars ixs x tel ps cps con
-        hcompsc <- if isHIT then case fixtarget of YesFixTarget -> computeHCompSplit delta1 n delta2 d pars ixs x tel ps cps; _ -> return Nothing
-                            else return Nothing
+        hcompsc <- if isHIT && fixtarget == YesFixTarget
+                   then computeHCompSplit delta1 n delta2 d pars ixs x tel ps cps
+                   else return Nothing
         return $ (dr, catMaybes (mns ++ [hcompsc]))
 
       computeLitNeighborhoods = do
@@ -1389,6 +1419,15 @@ split' checkEmpty ind allowPartialCover fixtarget
           , "x       =" <+> prettyTCM x
           , "ps      =" <+> do addContext tel $ prettyTCMPatternList $ fromSplitPatterns ps
           , "cps     =" <+> prettyTCM cps
+          ]
+        ]
+      reportSDoc "tc.cover.top" 60 $ vcat
+        [ "TypeChecking.Coverage.split': split"
+        , nest 2 $ vcat
+          [ "tel     =" <+> (text . show) tel
+          , "x       =" <+> (text . show) x
+          , "ps      =" <+> (text . show) ps
+          , "cps     =" <+> (text . show) cps
           ]
         ]
 

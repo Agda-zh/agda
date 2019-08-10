@@ -10,7 +10,6 @@ import Control.Monad.Reader
 import Data.Function
 import qualified Data.IntMap as IntMap
 import qualified Data.List as List
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Foldable as Fold
 import qualified Data.Traversable as Trav
@@ -21,7 +20,8 @@ import Agda.Syntax.Abstract.Name as A
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 import Agda.Syntax.Internal.Generic
-import Agda.Syntax.Position (killRange)
+import Agda.Syntax.Internal.MetaVars
+import Agda.Syntax.Position (getRange, killRange)
 
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Builtin
@@ -31,7 +31,7 @@ import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
 import Agda.TypeChecking.Constraints
 import Agda.TypeChecking.Free
-import Agda.TypeChecking.Level
+import Agda.TypeChecking.Free.Lazy
 import Agda.TypeChecking.Records
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Irrelevance
@@ -51,15 +51,13 @@ import Agda.Utils.Except
   )
 
 import Agda.Utils.Function
-import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
-import Agda.Utils.Null
 import Agda.Utils.Size
 import Agda.Utils.Tuple
 import Agda.Utils.Permutation
-import Agda.Utils.Pretty ( prettyShow, render )
+import Agda.Utils.Pretty ( prettyShow )
 import Agda.Utils.Singleton
 import qualified Agda.Utils.Graph.TopSort as Graph
 import Agda.Utils.VarSet (VarSet)
@@ -131,7 +129,10 @@ assignTerm x tel v = do
 -- | Skip frozen check.  Used for eta expanding frozen metas.
 assignTermTCM' :: MetaId -> [Arg ArgName] -> Term -> TCM ()
 assignTermTCM' x tel v = do
-    reportSLn "tc.meta.assign" 70 $ prettyShow x ++ " := " ++ show v ++ "\n  in " ++ show tel
+    reportSDoc "tc.meta.assign" 70 $ vcat
+      [ "assignTerm" <+> prettyTCM x <+> " := " <+> prettyTCM v
+      , nest 2 $ "tel =" <+> prettyList_ (map (text . unArg) tel)
+      ]
      -- verify (new) invariants
     whenM (not <$> asksTC envAssignMetas) __IMPOSSIBLE__
 
@@ -388,7 +389,7 @@ blockTermOnProblem t v pid =
         updateMetaVar m' (\ mv -> mv { mvTwin = Just x })
         i   <- fresh
         -- This constraint is woken up when unblocking, so it doesn't need a problem id.
-        cmp <- buildProblemConstraint_ (ValueCmp CmpEq t v (MetaV x es))
+        cmp <- buildProblemConstraint_ (ValueCmp CmpEq (AsTermsOf t) v (MetaV x es))
         listenToMeta (CheckConstraint i cmp) x
         return v
 
@@ -438,7 +439,7 @@ postponeTypeCheckingProblem p unblock = do
   -- non-terminating solutions.
   es  <- map Apply <$> getContextArgs
   (_, v) <- newValueMeta DontRunMetaOccursCheck t
-  cmp <- buildProblemConstraint_ (ValueCmp CmpEq t v (MetaV m es))
+  cmp <- buildProblemConstraint_ (ValueCmp CmpEq (AsTermsOf t) v (MetaV m es))
   i   <- liftTCM fresh
   listenToMeta (CheckConstraint i cmp) m
   addConstraint (UnBlock m)
@@ -682,29 +683,26 @@ assign dir x args v = do
       -- e.g. _1 x (suc x) = suc (_2 x y)
       -- even though the lhs is not a pattern, we can prune the y from _2
 
-      (relVL, nonstrictVL, irrVL) <- do
-        -- Andreas, 2016-11-03 #2211 attempt to do s.th. for unused
-        if False -- irrelevant $ getMetaRelevance mvar
-          then do
-            reportSDoc "tc.meta.assign" 25 $ "meta is irrelevant or unused"
-            return (VarSet.toList $ allFreeVars args, empty, empty)
-          else do
-            let vars  = allFreeVarsWithOcc args
-                relVL       = IntMap.keys $ IntMap.filter isRelevant vars
-                nonstrictVL = IntMap.keys $ IntMap.filter isNonStrict vars
+      let
+                vars        = freeVars args
+                relVL       = filterVarMapToList isRelevant  vars
+                nonstrictVL = filterVarMapToList isNonStrict vars
+                irrVL       = filterVarMapToList (liftM2 (&&) isIrrelevant isUnguarded) vars
             -- Andreas, 2011-10-06 only irrelevant vars that are direct
             -- arguments to the meta, hence, can be abstracted over, may
             -- appear on the rhs.  (test/fail/Issue483b)
             -- Update 2011-03-27: Also irr. vars under record constructors.
-            let fromIrrVar (Var i [])   = return [i]
-                fromIrrVar (Con c _ vs)   =
-                  ifM (isNothing <$> isRecordConstructor (conName c)) (return []) $
-                    concat <$> mapM (fromIrrVar . {- stripDontCare .-} unArg) (fromMaybe __IMPOSSIBLE__ (allApplyElims vs))
-                fromIrrVar _ = return []
-            irrVL <- concat <$> mapM fromIrrVar
-                       [ v | Arg info v <- args, isIrrelevant info ]
-                          -- irrelevant (getRelevance info) ]
-            return (relVL, nonstrictVL, irrVL)
+            -- Andreas, 2019-06-25:  The reason is that when solving
+            -- @X args = v@ we drop all irrelevant arguments that
+            -- are not variables (after flattening of record constructors).
+            -- (See isVarOrIrrelevant in inverseSubst.)
+            -- Thus, the occurs-check needs to ensure only these variables
+            -- are mentioned on the rhs.
+            -- In the terminology of free variable analysis, the retained
+            -- irrelevant variables are exactly the Unguarded ones.
+      let allowedVars = (`mapVarMap` vars) $ IntMap.filter $ \ o ->
+            not (isIrrelevant o) || isUnguarded o
+
       reportSDoc "tc.meta.assign" 20 $
           let pr (Var n []) = text (show n)
               pr (Def c []) = prettyTCM c
@@ -721,7 +719,8 @@ assign dir x args v = do
       -- Herein, distinguish relevant and irrelevant vars,
       -- since when abstracting irrelevant lhs vars, they may only occur
       -- irrelevantly on rhs.
-      v <- liftTCM $ occursCheck x (relVL, nonstrictVL, irrVL) v
+      -- v <- liftTCM $ occursCheck x (relVL, nonstrictVL, irrVL) v
+      v <- liftTCM $ occursCheck x allowedVars v
 
       reportSLn "tc.meta.assign" 15 "passed occursCheck"
       verboseS "tc.meta.assign" 30 $ do
@@ -783,7 +782,7 @@ assign dir x args v = do
       -> TCM a
     attemptPruning x args fvs = do
       -- non-linear lhs: we cannot solve, but prune
-      killResult <- prune x args $ VarSet.toList fvs
+      killResult <- prune x args $ (`VarSet.member` fvs)
       reportSDoc "tc.meta.assign" 10 $
         "pruning" <+> prettyTCM x <+> do
         text $
@@ -940,7 +939,6 @@ assignMeta' m x t n ids v = do
     -- (no longer from ids which may not be the complete variable list
     -- any more)
     reportSDoc "tc.meta.assign" 15 $ "type of meta =" <+> prettyTCM t
-    reportSDoc "tc.meta.assign" 70 $ "type of meta =" <+> text (show t)
 
     (telv@(TelV tel' a),bs) <- telViewUpToPathBoundary n t
     reportSDoc "tc.meta.assign" 30 $ "tel'  =" <+> prettyTCM tel'
@@ -959,15 +957,7 @@ assignMeta' m x t n ids v = do
     whenM (optDoubleCheck <$> pragmaOptions) $ noConstraints $ dontAssignMetas $ do
       m <- lookupMeta x
       reportSDoc "tc.meta.check" 30 $ "double checking solution"
-      addContext tel' $ case mvJudgement m of
-        HasType{} -> do
-          reportSDoc "tc.meta.check" 30 $ nest 2 $
-            prettyTCM v' <+> " : " <+> prettyTCM a
-          checkInternal v' a
-        IsSort{}  -> void $ do
-          reportSDoc "tc.meta.check" 30 $ nest 2 $
-            prettyTCM v' <+> " is a sort"
-          checkSort defaultAction =<< shouldBeSort (El __DUMMY_SORT__ v')
+      addContext tel' $ checkSolutionForMeta x m v' a
 
     reportSDoc "tc.meta.assign" 10 $
       "solving" <+> prettyTCM x <+> ":=" <+> prettyTCM vsol
@@ -985,6 +975,24 @@ assignMeta' m x t n ids v = do
           equalTermOnFace (neg `apply1` r) t x v
           equalTermOnFace r  t y v
         return v
+
+-- | Check that the instantiation of the metavariable with the given
+--   term is well-typed.
+checkSolutionForMeta :: MetaId -> MetaVariable -> Term -> Type -> TCM ()
+checkSolutionForMeta x m v a = do
+  reportSDoc "tc.meta.check" 30 $ "checking solution for meta" <+> prettyTCM x
+  case mvJudgement m of
+    HasType{} -> do
+      reportSDoc "tc.meta.check" 30 $ nest 2 $
+        prettyTCM x <+> " : " <+> prettyTCM a <+> ":=" <+> prettyTCM v
+      traceCall (CheckMetaSolution (getRange m) x a v) $
+        checkInternal v a
+    IsSort{}  -> void $ do
+      reportSDoc "tc.meta.check" 30 $ nest 2 $
+        prettyTCM x <+> ":=" <+> prettyTCM v <+> " is a sort"
+      s <- shouldBeSort (El __DUMMY_SORT__ v)
+      traceCall (CheckMetaSolution (getRange m) x (sort (univSort Nothing s)) (Sort s)) $
+        checkSort defaultAction s
 
 -- | Turn the assignment problem @_X args <= SizeLt u@ into
 -- @_X args = SizeLt (_Y args)@ and constraint
@@ -1019,13 +1027,13 @@ subtypingForSizeLt dir   x mvar t args v cont = do
           -- Note: no eta-expansion of new meta possible/necessary.
           -- Add the size constraint @y args `dir` u@.
           let yArgs = MetaV y $ map Apply args
-          addConstraint $ dirToCmp (`ValueCmp` size) dir yArgs u
+          addConstraint $ dirToCmp (`ValueCmp` (AsTermsOf size)) dir yArgs u
           -- We continue with the new assignment problem, and install
           -- an exception handler, since we created a meta and a constraint,
           -- so we cannot fall back to the original handler.
           let xArgs = MetaV x $ map Apply args
               v'    = Def qSizeLt [Apply $ Arg ai yArgs]
-              c     = dirToCmp (`ValueCmp` sizeUniv) dir xArgs v'
+              c     = dirToCmp (`ValueCmp` (AsTermsOf sizeUniv)) dir xArgs v'
           catchConstraint c $ cont v'
         _ -> fallback
 
@@ -1244,6 +1252,7 @@ inverseSubst args = map (mapFst unArg) <$> loop (zip args terms)
                        , argInfoModality = Modality
                          { modRelevance  = max (getRelevance info) (getRelevance info')
                          , modQuantity   = max (getQuantity  info) (getQuantity  info')
+                         , modCohesion   = max (getCohesion  info) (getCohesion  info')
                          }
                        , argInfoOrigin   = min (getOrigin info) (getOrigin info')
                        , argInfoFreeVariables = unknownFreeVariables

@@ -6,20 +6,18 @@ module Agda.TypeChecking.Reduce where
 import Prelude hiding (mapM)
 import Control.Monad.Reader hiding (mapM)
 
-import qualified Data.List as List
 import Data.List ((\\))
 import Data.Maybe
 import Data.Map (Map)
-import Data.Monoid
 import Data.Traversable
-import Data.Hashable
+import Data.HashMap.Strict (HashMap)
 
 import Agda.Interaction.Options
 
 import Agda.Syntax.Position
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
-import Agda.Syntax.Internal.Pattern
+import Agda.Syntax.Internal.MetaVars
 import Agda.Syntax.Scope.Base (Scope)
 import Agda.Syntax.Literal
 
@@ -42,12 +40,10 @@ import {-# SOURCE #-} Agda.TypeChecking.Pretty
 import {-# SOURCE #-} Agda.TypeChecking.Rewriting
 import {-# SOURCE #-} Agda.TypeChecking.Reduce.Fast
 
-import Agda.Utils.Function
 import Agda.Utils.Functor
 import Agda.Utils.Lens
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
-import Agda.Utils.HashMap (HashMap)
 import Agda.Utils.Size
 import Agda.Utils.Tuple
 
@@ -116,7 +112,7 @@ instance Instantiate Term where
             instantiate' (MetaV m' es)
       Open                             -> return t
       OpenInstance                     -> return t
-      BlockedConst u | blocking  -> instantiate' $ u `applyE` es
+      BlockedConst u | blocking  -> instantiate' . unBrave $ BraveTerm u `applyE` es
                      | otherwise -> return t
       PostponedTypeCheckingProblem _ _ -> return t
   instantiate' (Level l) = levelTm <$> instantiate' l
@@ -223,6 +219,10 @@ instance Instantiate Constraint where
   instantiate' (HasPTSRule a b)     = uncurry HasPTSRule <$> instantiate' (a,b)
   instantiate' (UnquoteTactic m t h g) = UnquoteTactic m <$> instantiate' t <*> instantiate' h <*> instantiate' g
 
+instance Instantiate CompareAs where
+  instantiate' (AsTermsOf a) = AsTermsOf <$> instantiate' a
+  instantiate' AsTypes       = return AsTypes
+
 instance Instantiate e => Instantiate (Map k e) where
     instantiate' = traverse instantiate'
 
@@ -261,6 +261,10 @@ instance IsMeta Sort where
   isMeta (MetaS m _) = return $ Just m
   isMeta _           = return Nothing
 
+instance IsMeta CompareAs where
+  isMeta (AsTermsOf a) = isMeta a
+  isMeta AsTypes       = return Nothing
+
 -- | Case on whether a term is blocked on a meta (or is a meta).
 --   That means it can change its shape when the meta is instantiated.
 ifBlocked
@@ -294,9 +298,9 @@ instance Reduce Sort where
     reduce' s = do
       s <- instantiate' s
       case s of
-        PiSort s1 s2 -> do
-          (s1,s2) <- reduce' (s1,s2)
-          maybe (return $ PiSort s1 s2) reduce' $ piSort' s1 s2
+        PiSort a s -> do
+          (a,s) <- reduce' (a,s)
+          maybe (return $ PiSort a s) reduce' $ piSort' a s
         UnivSort s' -> do
           s' <- reduce' s'
           ui <- univInf
@@ -638,7 +642,7 @@ reduceHead v = do -- ignoreAbstractMode $ do
 
   -- first, possibly rewrite literal v to constructor form
   v <- constructorForm v
-  traceSDoc "tc.inj.reduce" 30 ("reduceHead" <+> prettyTCM v) $ do
+  traceSDoc "tc.inj.reduce" 30 (ignoreAbstractMode $ "reduceHead" <+> prettyTCM v) $ do
   case v of
     Def f es -> do
 
@@ -775,6 +779,10 @@ instance Reduce Constraint where
   reduce' (HasPTSRule a b)      = uncurry HasPTSRule <$> reduce' (a,b)
   reduce' (UnquoteTactic m t h g) = UnquoteTactic m <$> reduce' t <*> reduce' h <*> reduce' g
 
+instance Reduce CompareAs where
+  reduce' (AsTermsOf a) = AsTermsOf <$> reduce' a
+  reduce' AsTypes       = return AsTypes
+
 instance Reduce e => Reduce (Map k e) where
     reduce' = traverse reduce'
 
@@ -840,7 +848,7 @@ instance Simplify Elim where
 instance Simplify Sort where
     simplify' s = do
       case s of
-        PiSort s1 s2 -> piSort <$> simplify' s1 <*> simplify' s2
+        PiSort a s -> piSort <$> simplify' a <*> simplify' s
         UnivSort s -> do
           ui <- univInf
           univSort ui <$> simplify' s
@@ -916,7 +924,7 @@ instance Simplify Constraint where
     return $ ValueCmp cmp t u v
   simplify' (ValueCmpOnFace cmp p t u v) = do
     ((p,t),u,v) <- simplify' ((p,t),u,v)
-    return $ ValueCmp cmp t u v
+    return $ ValueCmp cmp (AsTermsOf t) u v
   simplify' (ElimCmp cmp fs t v as bs) =
     ElimCmp cmp fs <$> simplify' t <*> simplify' v <*> simplify' as <*> simplify' bs
   simplify' (LevelCmp cmp u v)    = uncurry (LevelCmp cmp) <$> simplify' (u,v)
@@ -932,6 +940,10 @@ instance Simplify Constraint where
   simplify' (HasBiggerSort a)     = HasBiggerSort <$> simplify' a
   simplify' (HasPTSRule a b)      = uncurry HasPTSRule <$> simplify' (a,b)
   simplify' (UnquoteTactic m t h g) = UnquoteTactic m <$> simplify' t <*> simplify' h <*> simplify' g
+
+instance Simplify CompareAs where
+  simplify' (AsTermsOf a) = AsTermsOf <$> simplify' a
+  simplify' AsTypes       = return AsTypes
 
 instance Simplify Bool where
   simplify' = return
@@ -977,7 +989,7 @@ instance Normalise Sort where
     normalise' s = do
       s <- reduce' s
       case s of
-        PiSort s1 s2 -> piSort <$> normalise' s1 <*> normalise' s2
+        PiSort a s -> piSort <$> normalise' a <*> normalise' s
         UnivSort s -> do
           ui <- univInf
           univSort ui <$> normalise' s
@@ -1090,6 +1102,10 @@ instance Normalise Constraint where
   normalise' (HasPTSRule a b)      = uncurry HasPTSRule <$> normalise' (a,b)
   normalise' (UnquoteTactic m t h g) = UnquoteTactic m <$> normalise' t <*> normalise' h <*> normalise' g
 
+instance Normalise CompareAs where
+  normalise' (AsTermsOf a) = AsTermsOf <$> normalise' a
+  normalise' AsTypes       = return AsTypes
+
 instance Normalise Bool where
   normalise' = return
 
@@ -1156,7 +1172,7 @@ instance InstantiateFull Sort where
         case s of
             Type n     -> Type <$> instantiateFull' n
             Prop n     -> Prop <$> instantiateFull' n
-            PiSort s1 s2 -> piSort <$> instantiateFull' s1 <*> instantiateFull' s2
+            PiSort a s -> piSort <$> instantiateFull' a <*> instantiateFull' s
             UnivSort s -> do
               ui <- univInf
               univSort ui <$> instantiateFull' s
@@ -1301,6 +1317,10 @@ instance InstantiateFull Constraint where
     HasPTSRule a b      -> uncurry HasPTSRule <$> instantiateFull' (a,b)
     UnquoteTactic m t g h -> UnquoteTactic m <$> instantiateFull' t <*> instantiateFull' g <*> instantiateFull' h
 
+instance InstantiateFull CompareAs where
+  instantiateFull' (AsTermsOf a) = AsTermsOf <$> instantiateFull' a
+  instantiateFull' AsTypes       = return AsTypes
+
 instance (InstantiateFull a) => InstantiateFull (Elim' a) where
   instantiateFull' (Apply v) = Apply <$> instantiateFull' v
   instantiateFull' (Proj o f)= pure $ Proj o f
@@ -1345,9 +1365,15 @@ instance InstantiateFull NLPat where
   instantiateFull' (PTerm x)  = PTerm <$> instantiateFull' x
 
 instance InstantiateFull NLPType where
-  instantiateFull' (NLPType l a) = NLPType
-    <$> instantiateFull' l
+  instantiateFull' (NLPType s a) = NLPType
+    <$> instantiateFull' s
     <*> instantiateFull' a
+
+instance InstantiateFull NLPSort where
+  instantiateFull' (PType x) = PType <$> instantiateFull' x
+  instantiateFull' (PProp x) = PProp <$> instantiateFull' x
+  instantiateFull' PInf      = return PInf
+  instantiateFull' PSizeUniv = return PSizeUniv
 
 instance InstantiateFull RewriteRule where
   instantiateFull' (RewriteRule q gamma f ps rhs t) =
@@ -1377,10 +1403,10 @@ instance InstantiateFull Defn where
       DataOrRecSig{} -> return d
       GeneralizableVar{} -> return d
       AbstractDefn d -> AbstractDefn <$> instantiateFull' d
-      Function{ funClauses = cs, funCompiled = cc, funInv = inv, funExtLam = extLam } -> do
-        (cs, cc, inv) <- instantiateFull' (cs, cc, inv)
+      Function{ funClauses = cs, funCompiled = cc, funCovering = cov, funInv = inv, funExtLam = extLam } -> do
+        (cs, cc, cov, inv) <- instantiateFull' (cs, cc, cov, inv)
         extLam <- instantiateFull' extLam
-        return $ d { funClauses = cs, funCompiled = cc, funInv = inv, funExtLam = extLam }
+        return $ d { funClauses = cs, funCompiled = cc, funCovering = cov, funInv = inv, funExtLam = extLam }
       Datatype{ dataSort = s, dataClause = cl } -> do
         s  <- instantiateFull' s
         cl <- instantiateFull' cl

@@ -8,12 +8,8 @@ import Control.Applicative ( Const(Const), getConst )
 import Control.Arrow (first)
 import Control.Monad.Identity
 
-import Data.Foldable (foldMap)
-import Data.Monoid
-import Data.Traversable
 import Data.Void
 
-import Agda.Syntax.Position
 import Agda.Syntax.Common
 import Agda.Syntax.Abstract as A
 import Agda.Syntax.Concrete (FieldAssignment', exprFieldA)
@@ -21,7 +17,6 @@ import Agda.Syntax.Info
 import Agda.Syntax.Scope.Base (emptyScopeInfo)
 
 import Agda.Utils.Either
-import Agda.Utils.Lens
 
 data AppView' arg = Application Expr [NamedArg arg]
   deriving (Functor)
@@ -237,6 +232,7 @@ instance ExprLike Expr where
       Macro{}                 -> f e
 
 instance ExprLike a => ExprLike (Arg a)     where
+instance ExprLike a => ExprLike (Maybe a)   where
 instance ExprLike a => ExprLike (Named x a) where
 instance ExprLike a => ExprLike [a]         where
 
@@ -262,16 +258,16 @@ instance ExprLike QName where
 instance ExprLike LamBinding where
   recurseExpr f e =
     case e of
-      DomainFree{}  -> pure e
-      DomainFull bs -> DomainFull <$> recurseExpr f bs
+      DomainFree t x -> DomainFree <$> recurseExpr f t <*> pure x
+      DomainFull bs  -> DomainFull <$> recurseExpr f bs
   foldExpr f e =
     case e of
-      DomainFree{}  -> mempty
+      DomainFree t _ -> foldExpr f t
       DomainFull bs -> foldExpr f bs
   traverseExpr f e =
     case e of
-      DomainFree{}  -> pure e
-      DomainFull bs -> DomainFull <$> traverseExpr f bs
+      DomainFree t x -> DomainFree <$> traverseExpr f t <*> pure x
+      DomainFull bs  -> DomainFull <$> traverseExpr f bs
 
 instance ExprLike GeneralizeTelescope where
   recurseExpr  f (GeneralizeTel s tel) = GeneralizeTel s <$> recurseExpr f tel
@@ -286,16 +282,16 @@ instance ExprLike DataDefParams where
 instance ExprLike TypedBinding where
   recurseExpr f e =
     case e of
-      TBind r xs e -> TBind r xs <$> recurseExpr f e
-      TLet r ds    -> TLet r <$> recurseExpr f ds
+      TBind r t xs e -> TBind r <$> recurseExpr f t <*> pure xs <*> recurseExpr f e
+      TLet r ds      -> TLet r <$> recurseExpr f ds
   foldExpr f e =
     case e of
-      TBind _ _ e  -> foldExpr f e
-      TLet _ ds    -> foldExpr f ds
+      TBind _ t _ e -> foldExpr f t `mappend` foldExpr f e
+      TLet _ ds     -> foldExpr f ds
   traverseExpr f e =
     case e of
-      TBind r xs e -> TBind r xs <$> traverseExpr f e
-      TLet r ds    -> TLet r <$> traverseExpr f ds
+      TBind r t xs e -> TBind r <$> traverseExpr f t <*> pure xs <*> traverseExpr f e
+      TLet r ds      -> TLet r <$> traverseExpr f ds
 
 instance ExprLike LetBinding where
   recurseExpr f e = do
@@ -339,6 +335,11 @@ instance ExprLike RHS where
       WithRHS x es cs         -> WithRHS x <$> rec es <*> rec cs
       RewriteRHS xes spats rhs ds -> RewriteRHS <$> rec xes <*> pure spats <*> rec rhs <*> rec ds
     where rec e = recurseExpr f e
+
+instance (ExprLike p, ExprLike e) => ExprLike (RewriteEqn' p e) where
+  recurseExpr f = \case
+    Rewrite es -> Rewrite <$> recurseExpr f es
+    Invert pes -> Invert <$> recurseExpr f pes
 
 instance ExprLike WhereDeclarations where
   recurseExpr f (WhereDecls a b) = WhereDecls a <$> recurseExpr f b

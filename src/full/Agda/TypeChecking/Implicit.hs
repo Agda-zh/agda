@@ -11,21 +11,22 @@ import Agda.Syntax.Internal as I
 
 import Agda.TypeChecking.Irrelevance
 import {-# SOURCE #-} Agda.TypeChecking.MetaVars
+import {-# SOURCE #-} Agda.TypeChecking.Rules.Term (unquoteTactic)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Pretty
 
+import Agda.Utils.Functor
+import Agda.Utils.Maybe
 import Agda.Utils.Tuple
-
-import Agda.Utils.Impossible
 
 -- | @implicitArgs n expand t@ generates up to @n@ implicit arguments
 --   metas (unbounded if @n<0@), as long as @t@ is a function type
 --   and @expand@ holds on the hiding info of its domain.
 
 implicitArgs
-  :: (MonadReduce m, MonadMetaSolver m, MonadDebug m)
+  :: (MonadReduce m, MonadMetaSolver m, MonadDebug m, MonadTCM m)
   => Int               -- ^ @n@, the maximum number of implicts to be inserted.
   -> (Hiding -> Bool)  -- ^ @expand@, the predicate to test whether we should keep inserting.
   -> Type              -- ^ The (function) type @t@ we are eliminating.
@@ -38,7 +39,7 @@ implicitArgs n expand t = mapFst (map (fmap namedThing)) <$> do
 --   and @expand@ holds on the hiding and name info of its domain.
 
 implicitNamedArgs
-  :: (MonadReduce m, MonadMetaSolver m, MonadDebug m)
+  :: (MonadReduce m, MonadMetaSolver m, MonadDebug m, MonadTCM m)
   => Int                          -- ^ @n@, the maximum number of implicts to be inserted.
   -> (Hiding -> ArgName -> Bool)  -- ^ @expand@, the predicate to test whether we should keep inserting.
   -> Type                         -- ^ The (function) type @t@ we are eliminating.
@@ -49,8 +50,8 @@ implicitNamedArgs n expand t0 = do
     reportSDoc "tc.term.args" 30 $ "implicitNamedArgs" <+> prettyTCM t0'
     reportSDoc "tc.term.args" 80 $ "implicitNamedArgs" <+> text (show t0')
     case unEl t0' of
-      Pi Dom{domInfo = info, domName = name, unDom = a} b
-        | let x = maybe "_" rangedThing name, expand (getHiding info) x -> do
+      Pi dom@Dom{domInfo = info, domTactic = tac, unDom = a} b
+        | let x = bareNameWithDefault "_" dom, expand (getHiding info) x -> do
           info' <- if hidden info then return info else do
             reportSDoc "tc.term.args.ifs" 15 $
               "inserting instance meta for type" <+> prettyTCM a
@@ -61,7 +62,8 @@ implicitNamedArgs n expand t0 = do
 
             return $ makeInstance info
           (_, v) <- newMetaArg info' x a
-          let narg = Arg info (Named (Just $ unranged x) v)
+          whenJust tac $ \ tac -> liftTCM $ unquoteTactic tac v a
+          let narg = Arg info (Named (Just $ WithOrigin Inserted $ unranged x) v)
           mapFst (narg :) <$> implicitNamedArgs (n-1) expand (absApp b v)
       _ -> return ([], t0')
 
@@ -102,7 +104,7 @@ newInteractionMetaArg info x a = do
 
 -- | Possible results of 'insertImplicit'.
 data ImplicitInsertion
-      = ImpInsert [Hiding] -- ^ Success: this many implicits have to be inserted (list can be empty).
+      = ImpInsert [Dom ()] -- ^ Success: this many implicits have to be inserted (list can be empty).
       | BadImplicits       -- ^ Error: hidden argument where there should have been a non-hidden argument.
       | NoSuchName ArgName -- ^ Error: bad named argument.
   deriving (Show)
@@ -119,10 +121,9 @@ insertImplicit
   :: NamedArg e  -- ^ Next given argument @a@.
   -> [Dom a]     -- ^ Expected arguments @ts@.
   -> ImplicitInsertion
-insertImplicit a doms = insertImplicit' a $ map name doms
-  where
-    name dom = x <$ argFromDom dom
-      where x = maybe "_" rangedThing $ domName dom
+insertImplicit a doms = insertImplicit' a $
+  for doms $ \ dom ->
+    dom $> bareNameWithDefault "_" dom
 
 -- | If the next given argument is @a@ and the expected arguments are @ts@
 --   @insertImplicit' a ts@ returns the prefix of @ts@ that precedes @a@.
@@ -131,18 +132,18 @@ insertImplicit a doms = insertImplicit' a $ map name doms
 --
 insertImplicit'
   :: NamedArg e     -- ^ Next given argument @a@.
-  -> [Arg ArgName]  -- ^ Expected arguments @ts@.
+  -> [Dom ArgName]  -- ^ Expected arguments @ts@.
   -> ImplicitInsertion
 insertImplicit' _ [] = BadImplicits
 insertImplicit' a ts
 
   -- If @a@ is visible, then take the non-visible prefix of @ts@.
-  | visible a = ImpInsert $ takeWhile notVisible $ map getHiding ts
+  | visible a = ImpInsert $ takeWhile notVisible $ map void ts
 
   -- If @a@ is named, take prefix of @ts@ until the name of @a@ (with correct hiding).
   -- If the name is not found, throw exception 'NoSuchName'.
-  | Just x <- rangedThing <$> nameOf (unArg a) = maybe (NoSuchName x) ImpInsert $
-      takeHiddenUntil (\ t -> x == unArg t && sameHiding a t) ts
+  | Just x <- bareNameOf a = maybe (NoSuchName x) ImpInsert $
+      takeHiddenUntil (\ t -> x == unDom t && sameHiding a t) ts
 
   -- If @a@ is neither visible nor named, take prefix of @ts@ with different hiding than @a@.
   | otherwise = maybe BadImplicits ImpInsert $
@@ -154,10 +155,10 @@ insertImplicit' a ts
     --   If @p@ never holds, 'Nothing' is returned.
     --
     --   Precondition: @p@ should imply @not . visible@.
-    takeHiddenUntil :: (Arg ArgName -> Bool) -> [Arg ArgName] -> Maybe [Hiding]
+    takeHiddenUntil :: (Dom ArgName -> Bool) -> [Dom ArgName] -> Maybe [Dom ()]
     takeHiddenUntil p ts =
       case ts2 of
         []      -> Nothing  -- Predicate was never true
-        (t : _) -> if visible t then Nothing else Just $ map getHiding ts1
+        (t : _) -> if visible t then Nothing else Just $ map void ts1
       where
       (ts1, ts2) = break (\ t -> p t || visible t) ts

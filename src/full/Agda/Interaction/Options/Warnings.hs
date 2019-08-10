@@ -23,8 +23,6 @@ where
 import Control.Arrow ( (&&&) )
 import Control.Monad ( guard )
 
-import Data.Traversable ( for )
-
 import Text.Read ( readMaybe )
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -139,6 +137,7 @@ data WarningName
   | LibUnknownField_
   -- Nicifer Warnings
   | EmptyAbstract_
+  | EmptyField_
   | EmptyGeneralize_
   | EmptyInstance_
   | EmptyMacro_
@@ -178,6 +177,7 @@ data WarningName
   | ModuleDoesntExport_
   | NotStrictlyPositive_
   | OldBuiltin_
+  | PragmaCompileErased_
   | RewriteMaybeNonConfluent_
   | RewriteNonConfluent_
   | SafeFlagNoPositivityCheck_
@@ -253,6 +253,7 @@ warningNameDescription w = case w of
   LibUnknownField_                 -> "Unknown field in library file."
   -- Nicifer Warnings
   EmptyAbstract_                   -> "Empty `abstract' blocks."
+  EmptyField_                      -> "Empty `field` blocks."
   EmptyGeneralize_                 -> "Empty `variable' blocks."
   EmptyInstance_                   -> "Empty `instance' blocks."
   EmptyMacro_                      -> "Empty `macro' blocks."
@@ -294,6 +295,7 @@ warningNameDescription w = case w of
   ModuleDoesntExport_              -> "Imported name is not actually exported."
   NotStrictlyPositive_             -> "Failed strict positivity checks."
   OldBuiltin_                      -> "Deprecated `BUILTIN' pragmas."
+  PragmaCompileErased_             -> "`COMPILE' pragma targeting an erased symbol."
   RewriteMaybeNonConfluent_      -> "Failed confluence checks while computing overlap."
   RewriteNonConfluent_           -> "Failed confluence checks while joining critical pairs."
   SafeFlagNonTerminating_          -> "`NON_TERMINATING' pragmas with the safe flag."

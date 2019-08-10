@@ -1,31 +1,37 @@
-
-module Agda.TypeChecking.Warnings where
+module Agda.TypeChecking.Warnings
+  ( MonadWarning(..)
+  , genericWarning
+  , genericNonFatalError
+  , warning_, warning, warnings
+  , isUnsolvedWarning
+  , isMetaWarning
+  , isMetaTCWarning
+  , onlyShowIfUnsolved
+  , WhichWarnings(..), classifyWarning
+  -- not exporting constructor of WarningsAndNonFatalErrors
+  , WarningsAndNonFatalErrors, tcWarnings, nonFatalErrors
+  , emptyWarningsAndNonFatalErrors, classifyWarnings
+  , runPM
+  ) where
 
 import qualified Data.Set as Set
 import qualified Data.List as List
 import Data.Maybe ( catMaybes )
 import Data.Semigroup ( Semigroup, (<>) )
 
-import Control.Monad ( guard, forM, unless )
+import Control.Monad ( forM, unless )
 import Control.Monad.Reader ( ReaderT )
 import Control.Monad.State ( StateT )
 import Control.Monad.Trans ( lift )
 
 import Agda.TypeChecking.Monad.Base
-import {-# SOURCE #-} Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Monad.Caching
-import {-# SOURCE #-} Agda.TypeChecking.Monad.Context ()
-import Agda.TypeChecking.Monad.Debug
-import {-# SOURCE #-} Agda.TypeChecking.Monad.MetaVars ()
-import {-# SOURCE #-} Agda.TypeChecking.Monad.Signature ()
-import {-# SOURCE #-} Agda.TypeChecking.Errors
 import {-# SOURCE #-} Agda.TypeChecking.Pretty
 import {-# SOURCE #-} Agda.TypeChecking.Pretty.Call
-import {-# SOURCE #-} Agda.TypeChecking.Pretty.Warning
+import {-# SOURCE #-} Agda.TypeChecking.Pretty.Warning ()
 
 import Agda.Syntax.Position
 import Agda.Syntax.Parser
-import Agda.Syntax.Concrete.Definitions (DeclarationWarning(..))
 
 import Agda.Interaction.Options
 import Agda.Interaction.Options.Warnings
@@ -50,7 +56,9 @@ instance Monad m => Semigroup (StateT s m P.Doc) where
 instance MonadWarning m => MonadWarning (StateT s m) where
   addWarning = lift . addWarning
 
-instance {-# OVERLAPPABLE #-} Semigroup (TCM P.Doc) where
+-- This instance is more specific than a generic instance
+-- @Semigroup a => Semigroup (TCM a)@
+instance {-# OVERLAPPING #-} Semigroup (TCM P.Doc) where
   d1 <> d2 = (<>) <$> d1 <*> d2
 
 instance MonadWarning TCM where
@@ -83,13 +91,14 @@ warning_ w = do
   p <- sayWhen r' c $ prettyTCM w
   return $ TCWarning r w p b
 
--- | @applyWarningMode@ filters out the warnings the user has not requested
--- Users are not allowed to ignore non-fatal errors.
-
-applyWarningMode :: WarningMode -> Warning -> Maybe Warning
-applyWarningMode wm w = case classifyWarning w of
-  ErrorWarnings -> Just w
-  AllWarnings   -> w <$ guard (Set.member (warningName w) $ wm ^. warningSet)
+-- UNUSED Liang-Ting Chen 2019-07-16
+---- | @applyWarningMode@ filters out the warnings the user has not requested
+---- Users are not allowed to ignore non-fatal errors.
+--
+--applyWarningMode :: WarningMode -> Warning -> Maybe Warning
+--applyWarningMode wm w = case classifyWarning w of
+--  ErrorWarnings -> Just w
+--  AllWarnings   -> w <$ guard (Set.member (warningName w) $ wm ^. warningSet)
 
 {-# SPECIALIZE warnings :: [Warning] -> TCM () #-}
 warnings :: MonadWarning m => [Warning] -> m ()
@@ -113,23 +122,17 @@ warnings ws = do
 warning :: MonadWarning m => Warning -> m ()
 warning = warnings . pure
 
-
--- | Classifying warnings: some are benign, others are (non-fatal) errors
-
-data WhichWarnings =
-    ErrorWarnings -- ^ warnings that will be turned into errors
-  | AllWarnings   -- ^ all warnings, including errors and benign ones
-  -- Note: order of constructors is important for the derived Ord instance
-  deriving (Eq, Ord)
-
 isUnsolvedWarning :: Warning -> Bool
-isUnsolvedWarning w = warningName w `elem` unsolvedWarnings
+isUnsolvedWarning w = warningName w `Set.member` unsolvedWarnings
 
-classifyWarning :: Warning -> WhichWarnings
-classifyWarning w =
-  if warningName w `elem` errorWarnings
-  then ErrorWarnings
-  else AllWarnings
+isMetaWarning :: Warning -> Bool
+isMetaWarning w = case w of
+   UnsolvedInteractionMetas{} -> True
+   UnsolvedMetaVariables{}    -> True
+   _                          -> False
+
+isMetaTCWarning :: TCWarning -> Bool
+isMetaTCWarning = isMetaWarning . tcWarning
 
 -- | Should we only emit a single warning with this constructor.
 onlyOnce :: Warning -> Bool
@@ -140,8 +143,37 @@ onlyShowIfUnsolved :: Warning -> Bool
 onlyShowIfUnsolved InversionDepthReached{} = True
 onlyShowIfUnsolved _ = False
 
-classifyWarnings :: [TCWarning] -> ([TCWarning], [TCWarning])
-classifyWarnings = List.partition $ (< AllWarnings) . classifyWarning . tcWarning
+-- | Classifying warnings: some are benign, others are (non-fatal) errors
+
+data WhichWarnings =
+    ErrorWarnings -- ^ warnings that will be turned into errors
+  | AllWarnings   -- ^ all warnings, including errors and benign ones
+  -- Note: order of constructors is important for the derived Ord instance
+  deriving (Eq, Ord)
+
+classifyWarning :: Warning -> WhichWarnings
+classifyWarning w =
+  if warningName w `Set.member` errorWarnings
+  then ErrorWarnings
+  else AllWarnings
+
+-- | Assorted warnings and errors to be displayed to the user
+data WarningsAndNonFatalErrors = WarningsAndNonFatalErrors
+  { tcWarnings     :: [TCWarning]
+  , nonFatalErrors :: [TCWarning]
+  }
+
+-- | The only way to construct a empty WarningsAndNonFatalErrors
+
+emptyWarningsAndNonFatalErrors :: WarningsAndNonFatalErrors
+emptyWarningsAndNonFatalErrors = WarningsAndNonFatalErrors [] []
+
+classifyWarnings :: [TCWarning] -> WarningsAndNonFatalErrors
+classifyWarnings ws = WarningsAndNonFatalErrors warnings errors
+  where
+    partite = (< AllWarnings) . classifyWarning . tcWarning
+    (errors, warnings) = List.partition partite ws
+
 
 -- | running the Parse monad
 

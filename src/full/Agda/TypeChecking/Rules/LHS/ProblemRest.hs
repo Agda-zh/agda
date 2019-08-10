@@ -1,16 +1,13 @@
 
 module Agda.TypeChecking.Rules.LHS.ProblemRest where
 
-import Control.Arrow (first, second)
 import Control.Monad
 
-import Data.Functor ((<$))
 import Data.Maybe
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 import Agda.Syntax.Internal.Pattern
-import Agda.Syntax.Abstract.Pattern
 import qualified Agda.Syntax.Abstract as A
 
 import Agda.TypeChecking.Monad
@@ -22,9 +19,7 @@ import Agda.TypeChecking.Rules.LHS.Problem
 import Agda.TypeChecking.Rules.LHS.Implicit
 
 import Agda.Utils.Functor
-import Agda.Utils.List
 import Agda.Utils.Size
-import Agda.Utils.Permutation
 
 import Agda.Utils.Impossible
 
@@ -44,7 +39,7 @@ useNamesFromPattern ps tel = telFromList (zipWith ren ps telList ++ telRemaining
         -- Andreas, 2017-10-12, issue #2803, also preserve user-written hidden names.
         -- However, not if the argument is named, because then the name in the telescope
         -- is significant for implicit insertion.
-        A.VarP (A.BindName x)
+        A.VarP A.BindName{unBind = x}
           | not (isNoName x)
           , visible dom || (getOrigin ai == UserWritten && nm == Nothing) ->
           dom{ unDom = (nameToArgName x, a) }
@@ -130,7 +125,13 @@ updateProblemRest st@(LHSState tel0 qs0 p@(Problem oldEqs ps ret) a psplit) = do
     ]
   reportSDoc "tc.lhs.problem" 60 $ addContext tel0 $ vcat
     [ nest 2 $ vcat
-      [ "qs1    =" <+> fsep (map pretty qs1)
+      [ "ps    =" <+> (text . show) ps
+      , "a     =" <+> (text . show) a
+      , "tel1  =" <+> (text . show) tel1
+      , "ps1   =" <+> (text . show) ps1
+      , "ps2   =" <+> (text . show) ps2
+      , "b     =" <+> (text . show) b
+      , "qs1   =" <+> fsep (map pretty qs1)
       ]
     ]
   return $ LHSState

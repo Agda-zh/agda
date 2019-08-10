@@ -18,59 +18,43 @@ module Agda.TypeChecking.Errors
 
 import Prelude hiding ( null )
 
-import Control.Monad.Reader
-import Control.Monad.State
-
 import Data.Function
-import Data.List (nub, sortBy, intersperse, isInfixOf, dropWhileEnd)
+import Data.List (sortBy, isInfixOf, dropWhileEnd)
 import Data.Maybe
 import Data.Char (toLower)
 import qualified Data.Set as Set
-import qualified Data.Map as Map
 import qualified Text.PrettyPrint.Boxes as Boxes
 
-import {-# SOURCE #-} Agda.Interaction.Imports (MainInterface(..))
-import Agda.Interaction.Options
-import Agda.Interaction.Options.Warnings
 import Agda.Syntax.Common
+import Agda.Syntax.Concrete.Pretty (prettyHiding, prettyRelevance)
 import Agda.Syntax.Fixity
 import Agda.Syntax.Notation
 import Agda.Syntax.Position
-import qualified Agda.Syntax.Info as A
 import qualified Agda.Syntax.Concrete as C
-import qualified Agda.Syntax.Concrete.Definitions as D
 import Agda.Syntax.Abstract as A
-import Agda.Syntax.Abstract.Views (deepUnscope)
 import Agda.Syntax.Internal as I
 import Agda.Syntax.Translation.InternalToAbstract
-import Agda.Syntax.Translation.AbstractToConcrete
-import Agda.Syntax.Scope.Monad (isDatatypeModule, withContextPrecedence)
+import Agda.Syntax.Scope.Monad (isDatatypeModule)
 import Agda.Syntax.Scope.Base
+
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Monad.Closure
 import Agda.TypeChecking.Monad.Context
 import Agda.TypeChecking.Monad.Debug
-import Agda.TypeChecking.Monad.Options
 import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Monad.State
-import Agda.TypeChecking.Monad.MetaVars
-import Agda.TypeChecking.Positivity
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Pretty.Call
 import Agda.TypeChecking.Pretty.Warning
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope ( ifPiType )
 import Agda.TypeChecking.Reduce (instantiate)
-import Agda.TypeChecking.Warnings
 
-import Agda.Utils.Except ( MonadError(catchError, throwError) )
+import Agda.Utils.Except ( MonadError(catchError) )
 import Agda.Utils.FileName
 import Agda.Utils.Function
-import Agda.Utils.Functor
-import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.Maybe
-import Agda.Utils.Monad
 import Agda.Utils.Null
 import Agda.Utils.NonemptyList
 import Agda.Utils.Pretty ( prettyShow )
@@ -159,6 +143,7 @@ errorString err = case err of
   IllformedProjectionPattern{}             -> "IllformedProjectionPattern"
   CannotEliminateWithPattern{}             -> "CannotEliminateWithPattern"
   IllegalLetInTelescope{}                  -> "IllegalLetInTelescope"
+  IllegalPatternInTelescope{}              -> "IllegalPatternInTelescope"
 -- UNUSED:  IncompletePatternMatching{}              -> "IncompletePatternMatching"
   InternalError{}                          -> "InternalError"
   InvalidPattern{}                         -> "InvalidPattern"
@@ -223,11 +208,14 @@ errorString err = case err of
   TooManyFields{}                          -> "TooManyFields"
   TooManyPolarities{}                      -> "TooManyPolarities"
   SplitOnIrrelevant{}                      -> "SplitOnIrrelevant"
+  SplitOnUnusableCohesion{}                -> "SplitOnUnusableCohesion"
   -- UNUSED: -- SplitOnErased{}                          -> "SplitOnErased"
   SplitOnNonVariable{}                     -> "SplitOnNonVariable"
   DefinitionIsIrrelevant{}                 -> "DefinitionIsIrrelevant"
+  DefinitionIsErased{}                     -> "DefinitionIsErased"
   VariableIsIrrelevant{}                   -> "VariableIsIrrelevant"
   VariableIsErased{}                       -> "VariableIsErased"
+  VariableIsOfUnusableCohesion{}           -> "VariableIsOfUnusableCohesion"
   UnequalBecauseOfUniverseConflict{}       -> "UnequalBecauseOfUniverseConflict"
   UnequalRelevance{}                       -> "UnequalRelevance"
   UnequalHiding{}                          -> "UnequalHiding"
@@ -250,8 +238,10 @@ errorString err = case err of
   WrongHidingInLambda{}                    -> "WrongHidingInLambda"
   WrongIrrelevanceInLambda{}               -> "WrongIrrelevanceInLambda"
   WrongQuantityInLambda{}                  -> "WrongQuantityInLambda"
+  WrongCohesionInLambda{}                  -> "WrongCohesionInLambda"
   WrongNamedArgument{}                     -> "WrongNamedArgument"
   WrongNumberOfConstructorArguments{}      -> "WrongNumberOfConstructorArguments"
+  QuantityMismatch{}                       -> "QuantityMismatch"
   HidingMismatch{}                         -> "HidingMismatch"
   RelevanceMismatch{}                      -> "RelevanceMismatch"
   NonFatalErrors{}                         -> "NonFatalErrors"
@@ -345,9 +335,16 @@ instance PrettyTCM TypeError where
     WrongQuantityInLambda ->
       fwords "Incorrect quantity annotation in lambda"
 
-    WrongNamedArgument a -> fsep $
+    WrongCohesionInLambda ->
+      fwords "Incorrect cohesion annotation in lambda"
+
+    WrongNamedArgument a xs0 -> fsep $
       pwords "Function does not accept argument "
       ++ [prettyTCM a] -- ++ pwords " (wrong argument name)"
+      ++ if null xs then [] else
+         [parens $ fsep $ text "possible arguments:" : map pretty xs]
+      where
+      xs = filter (not . isNoName) xs0
 
     WrongHidingInApplication t ->
       fwords "Found an implicit application where an explicit application was expected"
@@ -359,6 +356,10 @@ instance PrettyTCM TypeError where
     RelevanceMismatch r r' -> fwords $
       "Expected " ++ verbalize (Indefinite r') ++ " argument, but found " ++
       verbalize (Indefinite r) ++ " argument"
+
+    QuantityMismatch q q' -> fwords $
+      "Expected " ++ verbalize (Indefinite q') ++ " argument, but found " ++
+      verbalize (Indefinite q) ++ " argument"
 
     UninstantiatedDotPattern e -> fsep $
       pwords "Failed to infer the value of dotted pattern"
@@ -438,7 +439,7 @@ instance PrettyTCM TypeError where
         reportSLn "scope.class.error" 30 $ "filtered candidates = " ++ prettyShow xms
 
         -- If we found a copy of x with non-empty range, great!
-        ifJust (headMaybe xms) (\ (x', m) -> return (getRange x', m)) $ {-else-} do
+        ifJust (listToMaybe xms) (\ (x', m) -> return (getRange x', m)) $ {-else-} do
 
         -- If that failed, we pick the first m from ms which has a nameBindingSite.
         let rms = ms >>= \ m -> map (,m) $
@@ -448,7 +449,7 @@ instance PrettyTCM TypeError where
         reportSLn "scope.class.error" 30 $ "rangeful clashing modules = " ++ prettyShow rms
 
         -- If even this fails, we pick the first m and give no range.
-        return $ fromMaybe (noRange, m0) $ headMaybe rms
+        return $ fromMaybe (noRange, m0) $ listToMaybe rms
 
       fsep $
         pwords "Duplicate definition of module" ++ [prettyTCM x <> "."] ++
@@ -497,6 +498,10 @@ instance PrettyTCM TypeError where
       pwords "Cannot pattern match against" ++ [text $ verbalize $ getRelevance t] ++
       pwords "argument of type" ++ [prettyTCM $ unDom t]
 
+    SplitOnUnusableCohesion t -> fsep $
+      pwords "Cannot pattern match against" ++ [text $ verbalize $ getCohesion t] ++
+      pwords "argument of type" ++ [prettyTCM $ unDom t]
+
     -- UNUSED:
     -- SplitOnErased t -> fsep $
     --   pwords "Cannot pattern match against" ++ [text $ verbalize $ getQuantity t] ++
@@ -509,11 +514,17 @@ instance PrettyTCM TypeError where
     DefinitionIsIrrelevant x -> fsep $
       "Identifier" : prettyTCM x : pwords "is declared irrelevant, so it cannot be used here"
 
+    DefinitionIsErased x -> fsep $
+      "Identifier" : prettyTCM x : pwords "is declared erased, so it cannot be used here"
+
     VariableIsIrrelevant x -> fsep $
       "Variable" : prettyTCM (nameConcrete x) : pwords "is declared irrelevant, so it cannot be used here"
 
     VariableIsErased x -> fsep $
       "Variable" : prettyTCM (nameConcrete x) : pwords "is declared erased, so it cannot be used here"
+
+    VariableIsOfUnusableCohesion x c -> fsep
+      ["Variable", prettyTCM (nameConcrete x), "is declared", text (show c), "so it cannot be used here"]
 
     UnequalBecauseOfUniverseConflict cmp s t -> fsep $
       [prettyTCM s, notCmp cmp, prettyTCM t, "because this would result in an invalid use of Setω" ]
@@ -528,7 +539,11 @@ instance PrettyTCM TypeError where
       (s            , Sort DefS{}  ) -> prettyTCM $ ShouldBeASort $ El Inf s
       (_            , _            ) -> do
         (d1, d2, d) <- prettyInEqual s t
-        fsep $ [return d1, notCmp cmp, return d2] ++ pwords "of type" ++ [prettyTCM a] ++ [return d]
+        fsep $ [return d1, notCmp cmp, return d2]
+          ++ (case a of
+                AsTermsOf t -> pwords "of type" ++ [prettyTCM t]
+                AsTypes     -> [])
+          ++ [return d]
 
 -- UnequalLevel is UNUSED
 --   UnequalLevel cmp s t -> fsep $
@@ -587,20 +602,23 @@ instance PrettyTCM TypeError where
       pwords "With clause pattern " ++ [prettyA p] ++
       pwords " is not an instance of its parent pattern " ++ [P.fsep <$> prettyTCMPatterns [q]]
 
-    MetaCannotDependOn m ps i -> fsep $
+    -- The following error is caught and reraised as GenericDocError in Occurs.hs
+    MetaCannotDependOn m {- ps -} i -> fsep $
       pwords "The metavariable" ++ [prettyTCM $ MetaV m []] ++
       pwords "cannot depend on" ++ [pvar i] ++
-      pwords "because it" ++ deps
+      [] -- pwords "because it" ++ deps
         where
           pvar = prettyTCM . I.var
-          deps = case map pvar ps of
-            []  -> pwords "does not depend on any variables"
-            [x] -> pwords "only depends on the variable" ++ [x]
-            xs  -> pwords "only depends on the variables" ++ punctuate comma xs
+          -- deps = case map pvar ps of
+          --   []  -> pwords "does not depend on any variables"
+          --   [x] -> pwords "only depends on the variable" ++ [x]
+          --   xs  -> pwords "only depends on the variables" ++ punctuate comma xs
 
+    -- The following error is caught and reraised as GenericDocError in Occurs.hs
     MetaOccursInItself m -> fsep $
       pwords "Cannot construct infinite solution of metavariable" ++ [prettyTCM $ MetaV m []]
 
+    -- The following error is caught and reraised as GenericDocError in Occurs.hs
     MetaIrrelevantSolution m _ -> fsep $
       pwords "Cannot instantiate the metavariable because (part of) the" ++
       pwords "solution was created in an irrelevant context."
@@ -616,7 +634,7 @@ instance PrettyTCM TypeError where
       pwords "previous binding to" ++ [prettyTCM x]
 
     NoBindingForBuiltin x
-      | elem x [builtinZero, builtinSuc] -> fsep $
+      | x `elem` [builtinZero, builtinSuc] -> fsep $
         pwords "No binding for builtin " ++ [text x <> comma] ++
         pwords ("use {-# BUILTIN " ++ builtinNat ++ " name #-} to bind builtin natural " ++
                 "numbers to the type 'name'")
@@ -638,6 +656,10 @@ instance PrettyTCM TypeError where
     IllegalLetInTelescope tb -> fsep $
       -- pwords "The binding" ++
       [pretty tb] ++
+      pwords " is not allowed in a telescope here."
+
+    IllegalPatternInTelescope bd -> fsep $
+      [pretty bd] ++
       pwords " is not allowed in a telescope here."
 
     NoRHSRequiresAbsurdPattern ps -> fwords $
@@ -713,7 +735,7 @@ instance PrettyTCM TypeError where
              , suggestion inscope x
              ]
       suggestion inscope x = nest 2 $ par $
-        [ "did you forget space around the ':'?"  | elem ':' s ] ++
+        [ "did you forget space around the ':'?"  | ':' `elem` s ] ++
         [ "did you forget space around the '->'?" | isInfixOf "->" s ] ++
         [ sep [ "did you mean"
               , nest 2 $ vcat (punctuate " or" $ map (\ y -> text $ "'" ++ y ++ "'") ys) <> "?" ]
@@ -1056,6 +1078,7 @@ instance PrettyTCM TypeError where
             , inTopContext $ addContext ("_" :: String) $ prettyTCM cxt' ]
       where
         cxt' = cxt `abstract` raise (size cxt) (nameCxt names)
+        nameCxt :: [Name] -> I.Telescope
         nameCxt [] = EmptyTel
         nameCxt (x : xs) = ExtendTel (defaultDom (El __DUMMY_SORT__ $ I.var 0)) $
           NoAbs (P.prettyShow x) $ nameCxt xs
@@ -1190,17 +1213,26 @@ instance PrettyTCM SplitError where
 
     UnificationStuck c tel cIxs gIxs errs
       | length cIxs /= length gIxs -> __IMPOSSIBLE__
-      | otherwise                  -> vcat $
-          [ fsep $ pwords "I'm not sure if there should be a case for the constructor" ++
-                   [prettyTCM c <> ","] ++
-                   pwords "because I get stuck when trying to solve the following" ++
-                   pwords "unification problems (inferred index ≟ expected index):"
-          ] ++
-          zipWith (\c g -> nest 2 $ addContext tel $ prettyTCM c <+> "≟" <+> prettyTCM g) cIxs gIxs ++
-          if null errs then [] else
+      | otherwise                  -> vcat . concat $
+        [ [ fsep . concat $
+            [ pwords "I'm not sure if there should be a case for the constructor"
+            , [prettyTCM c <> ","]
+            , pwords "because I get stuck when trying to solve the following"
+            , pwords "unification problems (inferred index ≟ expected index):"
+            ]
+          ]
+        , zipWith prEq cIxs gIxs
+        , if null errs then [] else
             [ fsep $ pwords "Possible" ++ pwords (P.singPlural errs "reason" "reasons") ++
                      pwords "why unification failed:" ] ++
             map (nest 2 . prettyTCM) errs
+        ]
+      where
+        -- Andreas, 2019-08-08, issue #3943
+        -- To not print hidden indices just as {_}, we strip the Arg and print
+        -- the hiding information manually.
+        prEq cIx gIx = addContext tel $ nest 2 $ hsep [ pr cIx , "≟" , pr gIx ]
+        pr arg = prettyRelevance arg . prettyHiding arg id <$> prettyTCM (unArg arg)
 
     CosplitCatchall -> fsep $
       pwords "Cannot split into projections because not all clauses have a projection copattern"
@@ -1282,9 +1314,16 @@ instance Verbalize Relevance where
 
 instance Verbalize Quantity where
   verbalize = \case
-    Quantity0 -> "erased"
-    Quantity1 -> "linear"
-    Quantityω -> "unrestricted"
+    Quantity0{} -> "erased"
+    Quantity1{} -> "linear"
+    Quantityω{} -> "unrestricted"
+
+instance Verbalize Cohesion where
+  verbalize r =
+    case r of
+      Flat       -> "flat"
+      Continuous -> "continuous"
+      Squash     -> "squashed"
 
 -- | Indefinite article.
 data Indefinite a = Indefinite a

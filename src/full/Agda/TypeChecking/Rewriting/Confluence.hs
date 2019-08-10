@@ -21,15 +21,13 @@ import Control.Applicative
 import Control.Monad
 import Control.Monad.Reader
 
-import Data.IntSet (IntSet)
-import qualified Data.IntSet as IntSet
 import Data.Functor ( ($>) )
 import Data.List ( elemIndex )
-import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
+import Agda.Syntax.Internal.MetaVars
 
 import Agda.TypeChecking.Constraints
 import Agda.TypeChecking.Conversion
@@ -51,7 +49,6 @@ import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
 import Agda.TypeChecking.Warnings
 
-import Agda.Utils.Either
 import Agda.Utils.Except
 import Agda.Utils.Impossible
 import Agda.Utils.List
@@ -432,7 +429,7 @@ forceEtaExpansion a v (e:es) = case e of
     -- Force a to be a pi type
     reportSDoc "rewriting.confluence.eta" 40 $ fsep
       [ "Forcing" , prettyTCM v , ":" , prettyTCM a , "to take one more argument" ]
-    dom <- Dom i False Nothing <$> newTypeMeta_
+    dom <- defaultArgDom i <$> newTypeMeta_
     cod <- addContext dom $ newTypeMeta_
     equalType a $ mkPi (("x",) <$> dom) cod
 

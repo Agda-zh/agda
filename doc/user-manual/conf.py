@@ -193,6 +193,7 @@ latex_elements = {
 
 % Customised setup for CJK Characters
 \hypersetup{unicode=true}
+\usepackage[utf8]{inputenc}
 \usepackage{CJKutf8}
 \AtBeginDocument{\begin{CJK}{UTF8}{gbsn}}
 \AtEndDocument{\end{CJK}}

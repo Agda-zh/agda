@@ -17,11 +17,8 @@ module Agda.Termination.RecCheck
     )
  where
 
-import Control.Applicative
-
 import Data.Graph
 import Data.List (nub)
-import qualified Data.Map as Map
 import qualified Data.IntMap as IntMap
 
 import Agda.Syntax.Internal
@@ -30,8 +27,6 @@ import Agda.Syntax.Internal.Defs
 import Agda.TypeChecking.Monad
 
 import Agda.Utils.Pretty (prettyShow)
-
-import Agda.Utils.Impossible
 
 recursive :: [QName] -> TCM Bool
 recursive names = do
@@ -59,7 +54,7 @@ recDef names name = do
     Function{ funClauses = cls } -> anyDefs names cls
     _ -> return []
 
-  reportSLn "rec.graph" 20 $ unlines
+  reportS "rec.graph" 20
     [ "recDef " ++ prettyShow name
     , "  names in the type: " ++ show ns1
     , "  names in the def:  " ++ show ns2

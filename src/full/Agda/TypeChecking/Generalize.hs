@@ -4,7 +4,7 @@ module Agda.TypeChecking.Generalize
   , generalizeType'
   , generalizeTelescope ) where
 
-import Control.Arrow ((***), first, second)
+import Control.Arrow (first)
 import Control.Monad
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
@@ -12,21 +12,19 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.List (nub, partition, init, sortBy)
+import Data.List (partition, sortBy)
 import Data.Monoid
 import Data.Function (on)
-import Data.Traversable
 
 import Agda.Syntax.Common
 import Agda.Syntax.Concrete.Name (LensInScope(..))
 import Agda.Syntax.Position
 import Agda.Syntax.Internal
 import Agda.Syntax.Internal.Generic
-import Agda.Syntax.Literal
+import Agda.Syntax.Internal.MetaVars
 import Agda.Syntax.Scope.Monad (bindVariable)
-import Agda.Syntax.Scope.Base (Binder(..))
+import Agda.Syntax.Scope.Base (BindingSource(..))
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Abstract
 import Agda.TypeChecking.Constraints
 import Agda.TypeChecking.Conversion
 import Agda.TypeChecking.Free
@@ -36,7 +34,6 @@ import Agda.TypeChecking.MetaVars
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Substitute
-import Agda.TypeChecking.Telescope
 import Agda.TypeChecking.Warnings
 
 import Agda.Benchmarking (Phase(Typing, Generalize))
@@ -44,11 +41,9 @@ import Agda.Utils.Benchmark
 import Agda.Utils.Except
 import Agda.Utils.Functor
 import Agda.Utils.Impossible
-import Agda.Utils.Lens
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Size
-import Agda.Utils.Singleton
 import Agda.Utils.Permutation
 
 
@@ -732,9 +727,10 @@ createGenRecordType genRecMeta@(El genRecSort _) sortedMetas = do
                 , conData   = genRecName
                 , conAbstr  = ConcreteDef
                 , conInd    = Inductive
-                , conComp   = (emptyCompKit, Nothing)
+                , conComp   = emptyCompKit
+                , conProj   = Nothing
                 , conForced = []
-                , conErased = []
+                , conErased = Nothing
                 }
   let dummyTel 0 = EmptyTel
       dummyTel n = ExtendTel (defaultDom __DUMMY_TYPE__) $ Abs "_" $ dummyTel (n - 1)
@@ -770,7 +766,7 @@ fillInGenRecordDetails name con fields recTy fieldTel = do
           abstract cxtTel (El s $ Pi (defaultDom recTy) (Abs "r" $ unDom ty)) :
           mkFieldTypes flds (absApp ftel proj)
         where
-          s = PiSort (getSort recTy) (Abs "r" $ getSort ty)
+          s = PiSort (defaultDom recTy) (Abs "r" $ getSort ty)
           proj = Var 0 [Proj ProjSystem fld]
       mkFieldTypes _ _ = __IMPOSSIBLE__
   let fieldTypes = mkFieldTypes fields (raise 1 fieldTel)

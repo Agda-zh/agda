@@ -4,18 +4,19 @@
 
 module Agda.TypeChecking.Monad.State where
 
-import Control.Arrow (first)
+
 import qualified Control.Exception as E
-import Control.Monad.Reader (asks)
-import Control.Monad.State (put, get, gets, modify, modify', void)
+
+import Control.Monad.State (void)
 import Control.Monad.Trans (liftIO)
 
 import Data.Maybe
-import Data.Map (Map)
+
 import qualified Data.Map as Map
-import Data.Monoid
+
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.HashMap.Strict as HMap
 import Data.Traversable (traverse)
 
 import Agda.Benchmarking
@@ -33,14 +34,12 @@ import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Internal
 
 import Agda.TypeChecking.Monad.Base
-import Agda.TypeChecking.Warnings
+
 import {-# SOURCE #-} Agda.TypeChecking.Monad.Debug
-import {-# SOURCE #-} Agda.TypeChecking.Monad.Options
 import Agda.TypeChecking.Positivity.Occurrence
 import Agda.TypeChecking.CompiledClause
 
 import Agda.Utils.Hash
-import qualified Agda.Utils.HashMap as HMap
 import Agda.Utils.Lens
 import Agda.Utils.Monad (bracket_)
 import Agda.Utils.NonemptyList
@@ -303,7 +302,7 @@ updateFunClauses :: ([Clause] -> [Clause]) -> (Defn -> Defn)
 updateFunClauses f def@Function{ funClauses = cs} = def { funClauses = f cs }
 updateFunClauses f _                              = __IMPOSSIBLE__
 
-updateCovering :: ([Closure Clause] -> [Closure Clause]) -> (Defn -> Defn)
+updateCovering :: ([Clause] -> [Clause]) -> (Defn -> Defn)
 updateCovering f def@Function{ funCovering = cs} = def { funCovering = f cs }
 updateCovering f _                               = __IMPOSSIBLE__
 

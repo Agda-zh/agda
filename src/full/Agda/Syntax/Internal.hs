@@ -13,7 +13,6 @@ module Agda.Syntax.Internal
 import Prelude hiding (foldr, mapM, null)
 import GHC.Stack (HasCallStack, freezeCallStack, callStack)
 
-import Control.Applicative hiding (empty)
 import Control.Monad.Identity hiding (mapM)
 import Control.DeepSeq
 
@@ -38,11 +37,7 @@ import Agda.Utils.Empty
 import Agda.Utils.Functor
 import Agda.Utils.Geniplate
 import Agda.Utils.Lens
-import Agda.Utils.List
-import Agda.Utils.Maybe
-import Agda.Utils.NonemptyList
 import Agda.Utils.Null
-import Agda.Utils.Permutation
 import Agda.Utils.Singleton
 import Agda.Utils.Size
 import Agda.Utils.Pretty
@@ -67,89 +62,77 @@ import Agda.Utils.Impossible
 --   type, the elements should be compared by tabulating the domain type.
 --   Only supported in case the domain type is primIsOne, to obtain
 --   the correct equality for partial elements.
-data Dom e = Dom
+--
+data Dom' t e = Dom
   { domInfo   :: ArgInfo
   , domFinite :: !Bool
-  , domName   :: Maybe RString
+  , domName   :: Maybe NamedName  -- ^ e.g. @x@ in @{x = y : A} -> B@.
+  , domTactic :: Maybe t        -- ^ "@tactic e".
   , unDom     :: e
-  } deriving (Data, Ord, Show, Functor, Foldable, Traversable)
+  } deriving (Data, Show, Functor, Foldable, Traversable)
 
-instance Decoration Dom where
-  traverseF f (Dom ai b x a) = Dom ai b x <$> f a
+type Dom = Dom' Term
 
-instance HasRange a => HasRange (Dom a) where
+instance Decoration (Dom' t) where
+  traverseF f (Dom ai b x t a) = Dom ai b x t <$> f a
+
+instance HasRange a => HasRange (Dom' t a) where
   getRange = getRange . unDom
 
-instance KillRange a => KillRange (Dom a) where
-  killRange (Dom info b x a) = killRange4 Dom info b x a
+instance (KillRange t, KillRange a) => KillRange (Dom' t a) where
+  killRange (Dom info b x t a) = killRange5 Dom info b x t a
 
--- | Ignores 'Origin' and 'FreeVariables'.
-instance Eq a => Eq (Dom a) where
-  Dom (ArgInfo h1 m1 _ _) b1 s1 x1 == Dom (ArgInfo h2 m2 _ _) b2 s2 x2 =
+-- | Ignores 'Origin' and 'FreeVariables' and tactic.
+instance Eq a => Eq (Dom' t a) where
+  Dom (ArgInfo h1 m1 _ _) b1 s1 _ x1 == Dom (ArgInfo h2 m2 _ _) b2 s2 _ x2 =
     (h1, m1, b1, s1, x1) == (h2, m2, b2, s2, x2)
 
--- instance Show a => Show (Dom a) where
---   show = show . argFromDom
+instance LensNamed NamedName (Dom' t e) where
+  lensNamed f dom = f (domName dom) <&> \ nm -> dom { domName = nm }
 
-instance LensArgInfo (Dom e) where
+instance LensArgInfo (Dom' t e) where
   getArgInfo        = domInfo
   setArgInfo ai dom = dom { domInfo = ai }
   mapArgInfo f  dom = dom { domInfo = f $ domInfo dom }
 
 -- The other lenses are defined through LensArgInfo
 
-instance LensHiding (Dom e) where
-  getHiding = getHidingArgInfo
-  setHiding = setHidingArgInfo
-  mapHiding = mapHidingArgInfo
-
-instance LensModality (Dom e) where
-  getModality = getModalityArgInfo
-  setModality = setModalityArgInfo
-  mapModality = mapModalityArgInfo
-
-instance LensOrigin (Dom e) where
-  getOrigin = getOriginArgInfo
-  setOrigin = setOriginArgInfo
-  mapOrigin = mapOriginArgInfo
-
-instance LensFreeVariables (Dom e) where
-  getFreeVariables = getFreeVariablesArgInfo
-  setFreeVariables = setFreeVariablesArgInfo
-  mapFreeVariables = mapFreeVariablesArgInfo
+instance LensHiding        (Dom' t e) where
+instance LensModality      (Dom' t e) where
+instance LensOrigin        (Dom' t e) where
+instance LensFreeVariables (Dom' t e) where
 
 -- Since we have LensModality, we get relevance and quantity by default
 
-instance LensRelevance (Dom e) where
-  getRelevance = getRelevanceMod
-  setRelevance = setRelevanceMod
-  mapRelevance = mapRelevanceMod
+instance LensRelevance (Dom' t e) where
+instance LensQuantity  (Dom' t e) where
+instance LensCohesion  (Dom' t e) where
 
-instance LensQuantity (Dom e) where
-  getQuantity = getQuantityMod
-  setQuantity = setQuantityMod
-  mapQuantity = mapQuantityMod
+argFromDom :: Dom' t a -> Arg a
+argFromDom Dom{domInfo = i, unDom = a} = Arg i a
 
-argFromDom :: Dom a -> Arg a
-argFromDom (Dom i _ _ a) = Arg i a
+namedArgFromDom :: Dom' t a -> NamedArg a
+namedArgFromDom Dom{domInfo = i, domName = s, unDom = a} = Arg i $ Named s a
 
-namedArgFromDom :: Dom a -> NamedArg a
-namedArgFromDom (Dom i _ s a) = Arg i $ Named s a
+-- The following functions are less general than they could be:
+-- @Dom@ could be replaced by @Dom' t@.
+-- However, this causes problems with instance resolution in several places.
+-- often for class AddContext.
 
 domFromArg :: Arg a -> Dom a
-domFromArg (Arg i a) = Dom i False Nothing a
+domFromArg (Arg i a) = Dom i False Nothing Nothing a
 
 domFromNamedArg :: NamedArg a -> Dom a
-domFromNamedArg (Arg i a) = Dom i False (nameOf a) (namedThing a)
+domFromNamedArg (Arg i a) = Dom i False (nameOf a) Nothing (namedThing a)
 
 defaultDom :: a -> Dom a
 defaultDom = defaultArgDom defaultArgInfo
 
 defaultArgDom :: ArgInfo -> a -> Dom a
-defaultArgDom info x = Dom info False Nothing x
+defaultArgDom info x = domFromArg (Arg info x)
 
 defaultNamedArgDom :: ArgInfo -> String -> a -> Dom a
-defaultNamedArgDom info s = Dom info False (Just $ unranged s)
+defaultNamedArgDom info s x = (defaultArgDom info x) { domName = Just $ WithOrigin Inserted $ unranged s }
 
 -- | Type of argument lists.
 --
@@ -223,6 +206,8 @@ data Term = Var {-# UNPACK #-} !Int Elims -- ^ @x es@ neutral
             --   Replaces the @Sort Prop@ hack.
             --   The @String@ typically describes the location where we create this dummy,
             --   but can contain other information as well.
+            --   The second field accumulates eliminations in case we
+            --   apply a dummy term to more of them.
   deriving (Data, Show)
 
 type ConInfo = ConOrigin
@@ -249,28 +234,12 @@ instance LensOrigin (Elim' a) where
   mapOrigin f e@Proj{}  = e
   mapOrigin f e@IApply{} = e
 
--- | Names in binders and arguments.
-type ArgName = String
-
-argNameToString :: ArgName -> String
-argNameToString = id
-
-stringToArgName :: String -> ArgName
-stringToArgName = id
-
-appendArgNames :: ArgName -> ArgName -> ArgName
-appendArgNames = (++)
-
-nameToArgName :: Name -> ArgName
-nameToArgName = stringToArgName . prettyShow
-
-namedArgName :: NamedArg Name -> ArgName
-namedArgName x = maybe (nameToArgName $ namedArg x) rangedThing $ nameOf $ unArg x
-
 -- | Binder.
+--
 --   'Abs': The bound variable might appear in the body.
 --   'NoAbs' is pseudo-binder, it does not introduce a fresh variable,
 --      similar to the @const@ of Haskell.
+--
 data Abs a = Abs   { absName :: ArgName, unAbs :: a }
                -- ^ The body has (at least) one free variable.
                --   Danger: 'unAbs' doesn't shift variables properly
@@ -283,12 +252,14 @@ instance Decoration Abs where
 
 -- | Types are terms with a sort annotation.
 --
-data Type' a = El { _getSort :: Sort, unEl :: a }
+data Type'' t a = El { _getSort :: Sort' t, unEl :: a }
   deriving (Data, Show, Functor, Foldable, Traversable)
+
+type Type' a = Type'' Term a
 
 type Type = Type' Term
 
-instance Decoration Type' where
+instance Decoration (Type'' t) where
   traverseF f (El s a) = El s <$> f a
 
 class LensSort a where
@@ -307,8 +278,6 @@ instance LensSort a => LensSort (Dom a) where
 instance LensSort a => LensSort (Arg a) where
   lensSort = traverseF . lensSort
 
-instance LensSort a => LensSort (Abs a) where
-  lensSort = traverseF . lensSort
 
 -- | Sequence of types. An argument of the first type is bound in later types
 --   and so on.
@@ -320,15 +289,15 @@ type Telescope = Tele (Dom Type)
 
 -- | Sorts.
 --
-data Sort
-  = Type Level  -- ^ @Set ℓ@.
-  | Prop Level  -- ^ @Prop ℓ@.
+data Sort' t
+  = Type (Level' t)  -- ^ @Set ℓ@.
+  | Prop (Level' t)  -- ^ @Prop ℓ@.
   | Inf         -- ^ @Setω@.
   | SizeUniv    -- ^ @SizeUniv@, a sort inhabited by type @Size@.
-  | PiSort Sort (Abs Sort) -- ^ Sort of the pi type.
-  | UnivSort Sort -- ^ Sort of another sort.
-  | MetaS {-# UNPACK #-} !MetaId Elims
-  | DefS QName Elims -- ^ A postulated sort.
+  | PiSort (Dom' t (Type'' t t)) (Abs (Sort' t)) -- ^ Sort of the pi type.
+  | UnivSort (Sort' t) -- ^ Sort of another sort.
+  | MetaS {-# UNPACK #-} !MetaId [Elim' t]
+  | DefS QName [Elim' t] -- ^ A postulated sort.
   | DummyS String
     -- ^ A (part of a) term or type which is only used for internal purposes.
     --   Replaces the abuse of @Prop@ for a dummy sort.
@@ -336,29 +305,45 @@ data Sort
     --   but can contain other information as well.
   deriving (Data, Show)
 
+type Sort = Sort' Term
+
 -- | A level is a maximum expression of 0..n 'PlusLevel' expressions
 --   each of which is a number or an atom plus a number.
 --
 --   The empty maximum is the canonical representation for level 0.
-newtype Level = Max [PlusLevel]
+newtype Level' t = Max [PlusLevel' t]
   deriving (Show, Data)
 
-data PlusLevel
+type Level = Level' Term
+
+data PlusLevel' t
   = ClosedLevel Integer     -- ^ @n@, to represent @Setₙ@.
-  | Plus Integer LevelAtom  -- ^ @n + ℓ@.
+  | Plus Integer (LevelAtom' t)  -- ^ @n + ℓ@.
   deriving (Show, Data)
+
+type PlusLevel = PlusLevel' Term
 
 -- | An atomic term of type @Level@.
-data LevelAtom
-  = MetaLevel MetaId Elims
+data LevelAtom' t
+  = MetaLevel MetaId [Elim' t]
     -- ^ A meta variable targeting @Level@ under some eliminations.
-  | BlockedLevel MetaId Term
+  | BlockedLevel MetaId t
     -- ^ A term of type @Level@ whose reduction is blocked by a meta.
-  | NeutralLevel NotBlocked Term
+  | NeutralLevel NotBlocked t
     -- ^ A neutral term of type @Level@.
-  | UnreducedLevel Term
+  | UnreducedLevel t
     -- ^ Introduced by 'instantiate', removed by 'reduce'.
   deriving (Show, Data)
+
+type LevelAtom = LevelAtom' Term
+
+---------------------------------------------------------------------------
+-- * Brave Terms
+---------------------------------------------------------------------------
+
+-- | Newtypes for terms that produce a dummy, rather than crash, when
+--   applied to incompatible eliminations.
+newtype BraveTerm = BraveTerm { unBrave :: Term } deriving (Data, Show)
 
 ---------------------------------------------------------------------------
 -- * Blocked Terms
@@ -584,7 +569,7 @@ type DeBruijnPattern = Pattern' DBPatVar
 
 namedVarP :: PatVarName -> Named_ Pattern
 namedVarP x = Named named $ varP x
-  where named = if isUnderscore x then Nothing else Just $ unranged x
+  where named = if isUnderscore x then Nothing else Just $ WithOrigin Inserted $ unranged x
 
 namedDBVarP :: Int -> PatVarName -> Named_ DeBruijnPattern
 namedDBVarP m = (fmap . fmap) (\x -> DBPatVar x m) . namedVarP
@@ -634,7 +619,7 @@ toConPatternInfo _ = noConPatternInfo
 
 -- | Build 'ConInfo' from 'ConPatternInfo'.
 fromConPatternInfo :: ConPatternInfo -> ConInfo
-fromConPatternInfo = fromMaybe ConOCon . fmap patToConO . conPRecord
+fromConPatternInfo = maybe ConOCon patToConO . conPRecord
   where
     patToConO :: PatOrigin -> ConOrigin
     patToConO = \case
@@ -734,7 +719,7 @@ data Substitution' a
     --   @
 
   | Wk !Int (Substitution' a)
-    -- ^ Weakning substitution, lifts to an extended context.
+    -- ^ Weakening substitution, lifts to an extended context.
     --   @
     --         Γ ⊢ ρ : Δ
     --     -------------------
@@ -862,7 +847,7 @@ dummyLevel' file line = unreducedLevel $ dummyTerm' file line
 -- | A dummy term created at location.
 --   Note: use macro __DUMMY_TERM__ !
 dummyTerm :: String -> Int -> Term
-dummyTerm file line = dummyTerm' ("dummyTerm: " ++ file) line
+dummyTerm file = dummyTerm' ("dummyTerm: " ++ file)
 
 __DUMMY_TERM__ :: HasCallStack => Term
 __DUMMY_TERM__ = withFileAndLine' (freezeCallStack callStack) dummyTerm
@@ -870,7 +855,7 @@ __DUMMY_TERM__ = withFileAndLine' (freezeCallStack callStack) dummyTerm
 -- | A dummy level created at location.
 --   Note: use macro __DUMMY_LEVEL__ !
 dummyLevel :: String -> Int -> Level
-dummyLevel file line = dummyLevel' ("dummyLevel: " ++ file) line
+dummyLevel file = dummyLevel' ("dummyLevel: " ++ file)
 
 __DUMMY_LEVEL__ :: HasCallStack => Level
 __DUMMY_LEVEL__ = withFileAndLine' (freezeCallStack callStack) dummyLevel
@@ -971,7 +956,7 @@ type ListTel = ListTel' ArgName
 telFromList' :: (a -> ArgName) -> ListTel' a -> Telescope
 telFromList' f = List.foldr extTel EmptyTel
   where
-    extTel dom@(Dom{unDom = (x, a)}) = ExtendTel (dom{unDom = a}) . Abs (f x)
+    extTel dom@Dom{unDom = (x, a)} = ExtendTel (dom{unDom = a}) . Abs (f x)
 
 -- | Convert a list telescope to a telescope.
 telFromList :: ListTel -> Telescope
@@ -1019,7 +1004,7 @@ blockingMeta (Blocked m _) = Just m
 blockingMeta NotBlocked{}  = Nothing
 
 blocked :: MetaId -> a -> Blocked a
-blocked x = Blocked x
+blocked = Blocked
 
 notBlocked :: a -> Blocked a
 notBlocked = NotBlocked ReallyNotBlocked
@@ -1240,7 +1225,7 @@ instance TermSize Sort where
     Prop l    -> 1 + tsize l
     Inf       -> 1
     SizeUniv  -> 1
-    PiSort s s' -> 1 + tsize s + tsize s'
+    PiSort a s -> 1 + tsize a + tsize s
     UnivSort s -> 1 + tsize s
     MetaS _ es -> 1 + tsize es
     DefS _ es  -> 1 + tsize es
@@ -1310,7 +1295,7 @@ instance KillRange Sort where
     SizeUniv   -> SizeUniv
     Type a     -> killRange1 Type a
     Prop a     -> killRange1 Prop a
-    PiSort s1 s2 -> killRange2 PiSort s1 s2
+    PiSort a s -> killRange2 PiSort a s
     UnivSort s -> killRange1 UnivSort s
     MetaS x es -> killRange1 (MetaS x) es
     DefS d es  -> killRange2 DefS d es
@@ -1377,7 +1362,7 @@ instanceUniverseBiT' [] [t| ([Term], Term)                |]
 -----------------------------------------------------------------------------
 
 instance Pretty a => Pretty (Substitution' a) where
-  prettyPrec p rho = pr p rho
+  prettyPrec = pr
     where
     pr p rho = case rho of
       IdS              -> "idS"
@@ -1439,14 +1424,14 @@ instance Pretty a => Pretty (Tele (Dom a)) where
 instance Pretty Level where
   prettyPrec p (Max as) =
     case as of
-      []  -> prettyPrec p (ClosedLevel 0)
+      []  -> prettyPrec p (ClosedLevel 0 :: PlusLevel)
       [a] -> prettyPrec p a
       _   -> mparens (p > 9) $ List.foldr1 (\a b -> "lub" <+> a <+> b) $ map (prettyPrec 10) as
 
 instance Pretty PlusLevel where
   prettyPrec p l =
     case l of
-      ClosedLevel n -> sucs p n $ \_ -> "lzero"
+      ClosedLevel n -> sucs p n $ const "lzero"
       Plus n a      -> sucs p n $ \p -> prettyPrec p a
     where
       sucs p 0 d = d p
@@ -1471,8 +1456,8 @@ instance Pretty Sort where
       Prop l -> mparens (p > 9) $ "Prop" <+> prettyPrec 10 l
       Inf -> "Setω"
       SizeUniv -> "SizeUniv"
-      PiSort s b -> mparens (p > 9) $
-        "piSort" <+> prettyPrec 10 s
+      PiSort a b -> mparens (p > 9) $
+        "piSort" <+> pDom (domInfo a) (text (absName b) <+> ":" <+> pretty (unDom a))
                       <+> parens (sep [ text ("λ " ++ absName b ++ " ->")
                                       , nest 2 $ pretty (unAbs b) ])
       UnivSort s -> mparens (p > 9) $ "univSort" <+> prettyPrec 10 s
@@ -1561,3 +1546,6 @@ instance NFData a => NFData (Elim' a) where
   rnf (Apply x) = rnf x
   rnf Proj{}    = ()
   rnf (IApply x y r) = rnf x `seq` rnf y `seq` rnf r
+
+instance NFData e => NFData (Dom e) where
+  rnf (Dom a b c d e) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d `seq` rnf e

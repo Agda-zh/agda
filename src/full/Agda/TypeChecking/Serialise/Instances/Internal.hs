@@ -3,14 +3,11 @@
 
 module Agda.TypeChecking.Serialise.Instances.Internal where
 
-import Control.Monad.State.Strict
-
 import Agda.Syntax.Internal as I
 import Agda.Syntax.Position as P
 
 import Agda.TypeChecking.Serialise.Base
-import Agda.TypeChecking.Serialise.Instances.Common ()
-import Agda.TypeChecking.Serialise.Instances.Compilers ()
+import Agda.TypeChecking.Serialise.Instances.Compilers () --instance only
 
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.CompiledClause
@@ -22,7 +19,7 @@ import Agda.Utils.Permutation
 import Agda.Utils.Impossible
 
 instance EmbPrj a => EmbPrj (Dom a) where
-  icod_ (Dom a b c d) = icodeN' Dom a b c d
+  icod_ (Dom a b c d e) = icodeN' Dom a b c d e
 
   value = valueN Dom
 
@@ -224,6 +221,19 @@ instance EmbPrj NLPType where
 
   value = valueN NLPType
 
+instance EmbPrj NLPSort where
+  icod_ (PType a)   = icodeN 0 PType a
+  icod_ (PProp a)   = icodeN 1 PProp a
+  icod_ PInf        = icodeN 2 PInf
+  icod_ PSizeUniv   = icodeN 3 PSizeUniv
+
+  value = vcase valu where
+    valu [0, a] = valuN PType a
+    valu [1, a] = valuN PProp a
+    valu [2]    = valuN PInf
+    valu [3]    = valuN PSizeUniv
+    valu _      = malformed
+
 instance EmbPrj RewriteRule where
   icod_ (RewriteRule a b c d e f) = icodeN' RewriteRule a b c d e f
 
@@ -318,7 +328,7 @@ instance EmbPrj Defn where
     icodeN 1 (\ a b s -> Function a b s t []) a b s c d e f g h i j k
   icod_ (Datatype    a b c d e f g h i)                 = icodeN 2 Datatype a b c d e f g h i
   icod_ (Record      a b c d e f g h i j k)             = icodeN 3 Record a b c d e f g h i j k
-  icod_ (Constructor a b c d e f g h i)                 = icodeN 4 Constructor a b c d e f g h i
+  icod_ (Constructor a b c d e f g h i j)               = icodeN 4 Constructor a b c d e f g h i j
   icod_ (Primitive   a b c d e)                         = icodeN 5 Primitive a b c d e
   icod_ AbstractDefn{}                                  = __IMPOSSIBLE__
   icod_ GeneralizableVar                                = icodeN 6 GeneralizableVar
@@ -329,7 +339,7 @@ instance EmbPrj Defn where
     valu [1, a, b, s, c, d, e, f, g, h, i, j, k]    = valuN (\ a b s -> Function a b s Nothing []) a b s c d e f g h i j k
     valu [2, a, b, c, d, e, f, g, h, i]             = valuN Datatype a b c d e f g h i
     valu [3, a, b, c, d, e, f, g, h, i, j, k]       = valuN Record  a b c d e f g h i j k
-    valu [4, a, b, c, d, e, f, g, h, i]             = valuN Constructor a b c d e f g h i
+    valu [4, a, b, c, d, e, f, g, h, i, j]          = valuN Constructor a b c d e f g h i j
     valu [5, a, b, c, d, e]                         = valuN Primitive   a b c d e
     valu [6]                                        = valuN GeneralizableVar
     valu _                                          = malformed

@@ -3,40 +3,23 @@ module Agda.TypeChecking.Quote where
 
 import Control.Arrow ((&&&))
 import Control.Monad
-import Control.Monad.State (runState, get, put)
-import Control.Monad.Reader (asks)
-import Control.Monad.Writer (execWriterT, tell)
-import Control.Monad.Trans (lift)
 
-import Data.Char
 import Data.Maybe (fromMaybe)
-import Data.Traversable (traverse)
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal as I
 import Agda.Syntax.Internal.Pattern ( dbPatPerm' )
 import Agda.Syntax.Literal
 import Agda.Syntax.Position
-import Agda.Syntax.Translation.InternalToAbstract
 
 import Agda.TypeChecking.CompiledClause
 import Agda.TypeChecking.DropArgs
-import Agda.TypeChecking.Free
 import Agda.TypeChecking.Level
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Builtin
-import Agda.TypeChecking.Pretty
-import Agda.TypeChecking.Reduce
-import Agda.TypeChecking.Reduce.Monad
 import Agda.TypeChecking.Substitute
-import Agda.TypeChecking.Telescope
 
-import Agda.Utils.Except
 import Agda.Utils.Impossible
-import Agda.Utils.Monad ( ifM )
-import Agda.Utils.Permutation ( Permutation(Perm), compactP, reverseP )
-import Agda.Utils.VarSet (VarSet)
-import qualified Agda.Utils.VarSet as Set
 import Agda.Utils.FileName
 import Agda.Utils.Size
 
@@ -150,10 +133,10 @@ quotingKit = do
       quoteSort Inf      = pure unsupportedSort
       quoteSort SizeUniv = pure unsupportedSort
       quoteSort PiSort{} = pure unsupportedSort
-      quoteSort UnivSort{} = pure unsupportedSort
+      quoteSort UnivSort{}   = pure unsupportedSort
       quoteSort (MetaS x es) = quoteTerm $ MetaV x es
-      quoteSort (DefS d es) = quoteTerm $ Def d es
-      quoteSort (DummyS s) =__IMPOSSIBLE_VERBOSE__ s
+      quoteSort (DefS d es)  = quoteTerm $ Def d es
+      quoteSort (DummyS s)   =__IMPOSSIBLE_VERBOSE__ s
 
       quoteType :: Type -> ReduceM Term
       quoteType (El _ t) = quoteTerm t
@@ -172,8 +155,8 @@ quotingKit = do
       quotePat (ConP c _ ps)     = conP !@ quoteQName (conName c) @@ quotePats ps
       quotePat (LitP l)          = litP !@ quoteLit l
       quotePat (ProjP _ x)       = projP !@ quoteQName x
-      quotePat (IApplyP o t u x)  = pure unsupported
-      quotePat DefP{}             = pure unsupported
+      quotePat (IApplyP o t u x) = pure unsupported
+      quotePat DefP{}            = pure unsupported
 
       quoteClause :: Clause -> ReduceM Term
       quoteClause cl@Clause{namedClausePats = ps, clauseBody = body} =
@@ -185,14 +168,13 @@ quotingKit = do
             in normalClause !@ quotePats ps @@ quoteTerm v
 
       list :: [ReduceM Term] -> ReduceM Term
-      list []       = pure nil
-      list (a : as) = cons !@ a @@ list as
+      list = foldr (\ a as -> cons !@ a @@ as) (pure nil)
 
       quoteList :: (a -> ReduceM Term) -> [a] -> ReduceM Term
       quoteList q xs = list (map q xs)
 
       quoteDom :: (Type -> ReduceM Term) -> Dom Type -> ReduceM Term
-      quoteDom q (Dom{domInfo = info, unDom = t}) = arg !@ quoteArgInfo info @@ q t
+      quoteDom q Dom{domInfo = info, unDom = t} = arg !@ quoteArgInfo info @@ q t
 
       quoteAbs :: Subst t a => (a -> ReduceM Term) -> Abs a -> ReduceM Term
       quoteAbs q (Abs s t)   = abs !@! quoteString s @@ q t

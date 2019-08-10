@@ -25,13 +25,11 @@
  -}
 module Agda.Syntax.DoNotation (desugarDoNotation) where
 
-import Control.Monad
 import Data.Maybe
 
 import Agda.Syntax.Common
 import Agda.Syntax.Position
 import Agda.Syntax.Concrete
-import Agda.Syntax.Concrete.Operators
 
 import Agda.Syntax.Scope.Base
 import Agda.Syntax.Scope.Monad
@@ -64,8 +62,12 @@ desugarDo qBind qThen [] = genericError "Empty 'do' block"
 
 -- The last statement must be a DoThen
 desugarDo qBind qThen [s]
-  | DoThen e <- s = return e
-  | otherwise     = genericError "The last statement in a 'do' block must be an expression"
+  | DoThen e              <- s           = return e
+  | DoBind r p e []       <- s
+  , Just (r' , NotHidden) <- isAbsurdP p =
+      return $ appOp (setRange r qBind) e $ AbsurdLam r' NotHidden
+  | otherwise                            =
+      genericError "The last statement in a 'do' block must be an expression or an absurd match."
 
 -- `DoThen` and `DoLet` are easy
 desugarDo qBind qThen (DoThen e   : ss) = appOp qThen e   <$> desugarDo qBind qThen ss
@@ -115,7 +117,7 @@ matchingBind qBind r p e body cs =
 nonMatchingBind :: QName -> Range -> Name -> Expr -> Expr -> Expr
 nonMatchingBind qBind r x e body =
     appOp (setRange r qBind) e $ Lam (getRange (x, body)) [bx] body
-  where bx = DomainFree $ defaultNamedArg $ mkBoundName_ x
+  where bx = DomainFree $ defaultNamedArg $ mkBinder_ x
 
 appOp :: QName -> Expr -> Expr -> Expr
 appOp q e1 e2 = app (Ident q) [par e1, par e2]

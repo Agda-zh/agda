@@ -13,6 +13,7 @@ TOP=.
 include ./mk/paths.mk
 
 CABAL_CMD=cabal
+STACK_CMD=stack
 
 # Run in interactive and parallel mode by default
 
@@ -46,12 +47,19 @@ install: install-bin compile-emacs-mode setup-emacs-mode
 prof : install-prof-bin
 
 CABAL_INSTALL_HELPER = $(CABAL_CMD) install --disable-documentation
+STACK_BUILD = $(STACK_CMD) build Agda --no-haddock
 
 # 2016-07-15. We use a different build directory in the quick
 # installation for avoiding recompilation (see Issue #2083 and
 # https://github.com/haskell/cabal/issues/1893).
 
-QUICK_CABAL_INSTALL = $(CABAL_INSTALL_HELPER) --builddir=$(BUILD_DIR)-quick
+QUICK_BUILD_DIR     = $(BUILD_DIR)-quick
+QUICK_CABAL_INSTALL = $(CABAL_INSTALL_HELPER) --builddir=$(QUICK_BUILD_DIR)
+
+QUICK_STACK_BUILD_WORK_DIR = .stack-work-quick
+QUICK_STACK_BUILD = $(STACK_BUILD) \
+										--ghc-options=-O0 \
+										--work-dir=$(QUICK_STACK_BUILD_WORK_DIR) 
 
 SLOW_CABAL_INSTALL_OPTS = --builddir=$(BUILD_DIR) --enable-tests
 CABAL_INSTALL           = $(CABAL_INSTALL_HELPER) \
@@ -68,6 +76,12 @@ CABAL_INSTALL_BIN_OPTS = --disable-library-profiling \
 CABAL_CONFIGURE_OPTS = $(SLOW_CABAL_INSTALL_OPTS) \
                        $(CABAL_INSTALL_BIN_OPTS)
 
+STACK_INSTALL_OPTS     = --flag Agda:enable-cluster-counting $(STACK_OPTS)
+STACK_INSTALL_BIN_OPTS = --test \
+												 --no-run-tests \
+												 --no-library-profiling \
+                         $(STACK_INSTALL_OPTS)
+
 # Ensures that the Git hash that is sometimes displayed by --version
 # is correct (#2988).
 .PHONY : ensure-hash-is-correct
@@ -78,39 +92,44 @@ ensure-hash-is-correct :
 quick-install-bin : ensure-hash-is-correct
 	$(QUICK_CABAL_INSTALL) $(CABAL_INSTALL_BIN_OPTS)
 
-# Install Agda using Stack
-.PHONY : stack-install-bin
-stack-install-bin :
-	stack build Agda:exe:agda \
-		--flag Agda:enable-cluster-counting \
-		--no-haddock \
-		--no-library-profiling
+.PHONY : quicker-stack-install-bin
+quicker-stack-install-bin: ensure-hash-is-correct
+	$(QUICK_STACK_BUILD) $(STACK_INSTALL_BIN_OPTS)
+
+.PHONY : quicker-stack-copy-artefacts
+quicker-stack-copy-artefacts : quicker-stack-install-bin
+	mkdir -p $(QUICK_BUILD_DIR)/build/
+	cp -r $(shell stack path --dist-dir --work-dir=$(QUICK_STACK_BUILD_WORK_DIR))/build $(QUICK_BUILD_DIR)
+
+# Disabling optimizations leads to *much* quicker build times.
+# The performance loss is acceptable for running small tests.
+.PHONY : quicker-install-bin
+quicker-install-bin : ensure-hash-is-correct
+ifneq ("$(wildcard stack.yaml)","") # if `stack.yaml` exists
+	time $(MAKE) quicker-stack-copy-artefacts
+else
+	time $(QUICK_CABAL_INSTALL) $(CABAL_INSTALL_BIN_OPTS) --ghc-options=-O0 --program-suffix=-quicker
+endif
 
 # The Stack version of `Cabal install --enable-test`
-.PHONY : stack-install-test
-stack-install-test :
-	stack build Agda:test:agda-tests \
-		--no-run-tests \
-		--flag Agda:enable-cluster-counting \
-		--no-haddock \
-		--no-library-profiling
+.PHONY : stack-install-bin
+stack-install-bin:
+	$(STACK_BUILD) $(STACK_INSTALL_BIN_OPTS)
 
 # Copy the artefacts built by Stack as if they were build by Cabal.
 .PHONY : stack-copy-artefacts
-stack-copy-artefacts : stack-install-bin stack-install-test
+stack-copy-artefacts : stack-install-bin
 	mkdir -p $(BUILD_DIR)/build/
 	cp -r $(shell stack path --dist-dir)/build $(BUILD_DIR)
 
 .PHONY : install-bin
-
 install-bin : ensure-hash-is-correct
 ifneq ("$(wildcard stack.yaml)","") # if `stack.yaml` exists
-	@echo ""===================== Installing using Stack =============================""
-	$(MAKE) stack-install-bin
-	$(MAKE) stack-install-test
-	$(MAKE) stack-copy-artefacts
+	@echo "===================== Installing using Stack ============================="
+	time $(MAKE) stack-copy-artefacts
 else
-	$(CABAL_INSTALL) $(CABAL_INSTALL_BIN_OPTS)
+	@echo "===================== Installing using Cabal ============================="
+	time $(CABAL_INSTALL) $(CABAL_INSTALL_BIN_OPTS)
 endif
 
 .PHONY : install-prof-bin
@@ -372,7 +391,7 @@ clean_helper = if [ -d $(1) ]; then $(CABAL_CMD) clean --builddir=$(1); fi;
 .PHONY : clean
 clean :
 	$(call clean_helper,$(BUILD_DIR))
-	$(call clean_helper,$(BUILD_DIR)-quick)
+	$(call clean_helper,$(QUICK_BUILD_DIR)
 
 ## Whitespace-related #####################################################
 

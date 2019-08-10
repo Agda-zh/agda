@@ -6,7 +6,6 @@
 module Agda.TypeChecking.Patterns.Abstract where
 
 import qualified Data.List as List
-import Data.Traversable hiding (mapM, sequence)
 import Data.Void
 
 import qualified Agda.Syntax.Abstract as A
@@ -21,8 +20,6 @@ import Agda.Syntax.Position
 
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Builtin
-
-import Agda.Utils.Functor
 
 import Agda.Utils.Impossible
 
@@ -41,7 +38,7 @@ expandLitPattern p = case asView p of
           info  = A.PatRange r
           cinfo = A.ConPatInfo ConOCon info ConPatEager
           p'    = foldr ($) zero $ List.genericReplicate n suc
-      return $ foldr (A.AsP info) p' (map A.BindName xs)
+      return $ foldr (A.AsP info) p' (map A.mkBindName xs)
   _ -> return p
 
   where

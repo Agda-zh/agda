@@ -7,9 +7,7 @@ module Agda.TypeChecking.InstanceArguments
   , postponeInstanceConstraints
   ) where
 
-import Control.Applicative hiding (empty)
 import Control.Monad.Reader
-import Control.Monad.State
 import qualified Data.IntSet as IntSet
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -22,9 +20,10 @@ import Agda.Interaction.Options (optOverlappingInstances)
 import Agda.Syntax.Common
 import Agda.Syntax.Position
 import Agda.Syntax.Internal as I
+import Agda.Syntax.Internal.MetaVars
 import Agda.Syntax.Scope.Base (isNameInScope)
 
-import Agda.TypeChecking.Errors ()
+import Agda.TypeChecking.Errors () --instance only
 import Agda.TypeChecking.Implicit (implicitArgs)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Builtin
@@ -33,10 +32,8 @@ import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Records
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
-import Agda.TypeChecking.Free
 
 import {-# SOURCE #-} Agda.TypeChecking.Constraints
-import {-# SOURCE #-} Agda.TypeChecking.MetaVars
 import {-# SOURCE #-} Agda.TypeChecking.Conversion
 
 import qualified Agda.Benchmarking as Benchmark
@@ -47,7 +44,6 @@ import Agda.Utils.Except
 import Agda.Utils.Lens
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
-import Agda.Utils.Functor
 import Agda.Utils.Pretty (prettyShow)
 import Agda.Utils.Null (empty)
 
@@ -147,7 +143,7 @@ initialInstanceCandidates t = do
     getScopeDefs :: QName -> TCM [Candidate]
     getScopeDefs n = do
       instanceDefs <- getInstanceDefs
-      rel          <- asksTC envRelevance
+      rel          <- asksTC getRelevance
       let qs = maybe [] Set.toList $ Map.lookup n instanceDefs
       catMaybes <$> mapM (candidate rel) qs
 
@@ -159,7 +155,7 @@ initialInstanceCandidates t = do
       -- in this case, we just ignore q (issue 674)
       flip catchError handle $ do
         def <- getConstInfo q
-        if not (defRelevance def `moreRelevant` rel) then return Nothing else do
+        if not (getRelevance def `moreRelevant` rel) then return Nothing else do
           -- Andreas, 2017-01-14: instantiateDef is a bit of an overkill
           -- if we anyway get the freeVarsToApply
           -- WAS: t <- defType <$> instantiateDef def
@@ -456,7 +452,7 @@ checkCandidates m t cands =
             -- Jesper, 05-12-2014: When we abort, we should add a constraint to
             -- instantiate the meta at a later time (see issue 1377).
             ctxElims <- map Apply <$> getContextArgs
-            guardConstraint (ValueCmp CmpEq t'' (MetaV m ctxElims) v) $ leqType t'' t
+            guardConstraint (ValueCmp CmpEq (AsTermsOf t'') (MetaV m ctxElims) v) $ leqType t'' t
             -- make a pass over constraints, to detect cases where some are made
             -- unsolvable by the assignment, but don't do this for FindInstance's
             -- to prevent loops.

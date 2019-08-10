@@ -4,9 +4,6 @@ module Agda.TypeChecking.Rules.Term where
 
 import Prelude hiding ( null )
 
-import Control.Monad.Trans
-import Control.Monad.Trans.Maybe
-import Control.Monad.State (get, put)
 import Control.Monad.Reader
 
 import Data.Maybe
@@ -14,7 +11,6 @@ import Data.Either (partitionEithers, lefts)
 import Data.Monoid (mappend)
 import qualified Data.List as List
 import qualified Data.Map as Map
-import qualified Data.Set as Set
 
 import Agda.Interaction.Options
 import Agda.Interaction.Highlighting.Generate (disambiguateRecordFields)
@@ -27,15 +23,15 @@ import Agda.Syntax.Concrete (FieldAssignment'(..), nameFieldA)
 import qualified Agda.Syntax.Concrete.Name as C
 import Agda.Syntax.Common
 import Agda.Syntax.Internal as I
+import Agda.Syntax.Internal.MetaVars
 import Agda.Syntax.Position
 import Agda.Syntax.Literal
 import Agda.Syntax.Scope.Base ( ThingsInScope, AbstractName
                               , emptyScopeInfo
                               , exportedNamesInScope)
-import Agda.Syntax.Scope.Monad (getNamedScope, freshAbstractQName)
+import Agda.Syntax.Scope.Monad (getNamedScope)
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 
-import Agda.TypeChecking.Abstract
 import Agda.TypeChecking.CompiledClause
 import Agda.TypeChecking.Constraints
 import Agda.TypeChecking.Conversion
@@ -48,7 +44,6 @@ import Agda.TypeChecking.Irrelevance
 import Agda.TypeChecking.IApplyConfluence
 import Agda.TypeChecking.Level
 import Agda.TypeChecking.MetaVars
-import Agda.TypeChecking.Names
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Patterns.Abstract
@@ -74,18 +69,13 @@ import {-# SOURCE #-} Agda.TypeChecking.Rules.Decl (checkSectionApplication)
 import {-# SOURCE #-} Agda.TypeChecking.Rules.Application
 
 import Agda.Utils.Except
-  ( ExceptT
-  , MonadError(catchError, throwError)
-  , runExceptT
-  )
-import Agda.Utils.Function
+  (MonadError(catchError, throwError))
 import Agda.Utils.Functor
 import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Null
-import Agda.Utils.NonemptyList
 import Agda.Utils.Pretty ( prettyShow )
 import qualified Agda.Utils.Pretty as P
 import Agda.Utils.Size
@@ -112,7 +102,7 @@ isType_ e = traceCall (IsType_ e) $ do
     A.Fun i (Arg info t) b -> do
       a <- setArgInfo info . defaultDom <$> isType_ t
       b <- isType_ b
-      s <- inferFunSort (getSort a) (getSort b)
+      s <- inferFunSort a (getSort b)
       let t' = El s $ Pi a $ NoAbs underscore b
       noFunctionsIntoSize b t'
       return t'
@@ -139,7 +129,7 @@ isType_ e = traceCall (IsType_ e) $ do
     A.App i s arg
       | visible arg,
         A.Set _ 0 <- unScope s -> do
-      unlessM hasUniversePolymorphism $ typeError $ GenericError $
+      unlessM hasUniversePolymorphism $ genericError
         "Use --universe-polymorphism to enable level arguments to Set"
       -- allow NonStrict variables when checking level
       --   Set : (NonStrict) Level -> Set\omega
@@ -151,7 +141,7 @@ isType_ e = traceCall (IsType_ e) $ do
       | visible arg,
         A.Prop _ 0 <- unScope s -> do
       unlessM isPropEnabled $ typeError NeedOptionProp
-      unlessM hasUniversePolymorphism $ typeError $ GenericError $
+      unlessM hasUniversePolymorphism $ genericError
         "Use --universe-polymorphism to enable level arguments to Prop"
       applyRelevanceToContext NonStrict $
         sort . Prop <$> checkLevel arg
@@ -206,7 +196,9 @@ noFunctionsIntoSize t tBlame = do
   reportSDoc "tc.fun" 20 $ do
     let El s (Pi dom b) = tBlame
     sep [ "created function type " <+> prettyTCM tBlame
-        , "with pts rule" <+> prettyTCM (getSort dom, getSort b, s)
+        , "with pts rule (" <+> prettyTCM (getSort dom) <+>
+                        "," <+> underAbstraction_ b (prettyTCM . getSort) <+>
+                        "," <+> prettyTCM s <+> ")"
         ]
   s <- reduce $ getSort t
   when (s == SizeUniv) $ do
@@ -272,28 +264,39 @@ checkTelescope' lamOrPi (b : tel) ret =
 --   is needed for irrelevance.
 
 checkTypedBindings :: LamOrPi -> A.TypedBinding -> (Telescope -> TCM a) -> TCM a
-checkTypedBindings lamOrPi (A.TBind r xs' e) ret = do
-    let xs = (map . fmap . fmap) A.unBind xs'
+checkTypedBindings lamOrPi (A.TBind r tac xps e) ret = do
+    let xs = map (updateNamedArg $ A.unBind . A.binderName) xps
+    tac <- traverse (checkTacticAttribute lamOrPi) tac
+    whenJust tac $ \ t -> reportSDoc "tc.term.tactic" 30 $ "Checked tactic attribute:" <?> prettyTCM t
     -- Andreas, 2011-04-26 irrelevant function arguments may appear
     -- non-strictly in the codomain type
     -- 2011-10-04 if flag --experimental-irrelevance is set
     experimental <- optExperimentalIrrelevance <$> pragmaOptions
-    t <- modEnv lamOrPi $ isType_ e
+
+    let cs = map getCohesion xps
+        c = headWithDefault __IMPOSSIBLE__ cs
+    unless (all (c ==) cs) $ __IMPOSSIBLE__
+
+    t <- applyCohesionToContext c $ modEnv lamOrPi $ isType_ e
 
     -- Jesper, 2019-02-12, Issue #3534: warn if the type of an
     -- instance argument does not have the right shape
-    unlessNull (filter isInstance xs') $ \ixs -> do
+    unlessNull (filter isInstance xps) $ \ixs -> do
       (tel, target) <- getOutputTypeName t
       case target of
         OutputTypeName{} -> return ()
         OutputTypeVar{}  -> return ()
-        OutputTypeVisiblePi{} -> warning . InstanceArgWithExplicitArg =<< prettyTCM (A.TBind r ixs e)
+        OutputTypeVisiblePi{} -> warning . InstanceArgWithExplicitArg =<< prettyTCM (A.mkTBind r ixs e)
         OutputTypeNameNotYetKnown{} -> return ()
-        NoOutputTypeName -> warning . InstanceNoOutputTypeName =<< prettyTCM (A.TBind r ixs e)
+        NoOutputTypeName -> warning . InstanceNoOutputTypeName =<< prettyTCM (A.mkTBind r ixs e)
 
-    let xs' = (map . mapRelevance) (modRel lamOrPi experimental) xs
-    addContext (xs', t) $
-      ret $ namedBindsToTel xs t
+    let setTac tac EmptyTel            = EmptyTel
+        setTac tac (ExtendTel dom tel) = ExtendTel dom{ domTactic = tac } $ setTac (raise 1 tac) <$> tel
+        xs' = map (modMod lamOrPi experimental) xs
+    let tel = setTac tac $ namedBindsToTel xs t
+
+    addContext (xs', t) $ addTypedPatterns xps (ret tel)
+
     where
         -- if we are checking a typed lambda, we resurrect before we check the
         -- types, but do not modify the new context entries
@@ -301,10 +304,32 @@ checkTypedBindings lamOrPi (A.TBind r xs' e) ret = do
         -- modify the new context entries
         modEnv LamNotPi = workOnTypes
         modEnv _        = id
-        modRel PiNotLam xp = if xp then irrToNonStrict else id
-        modRel _        _  = id
+        modMod PiNotLam xp = (if xp then mapRelevance irrToNonStrict else id)
+                           . (setQuantity topQuantity)
+        modMod _        _  = id
 checkTypedBindings lamOrPi (A.TLet _ lbs) ret = do
     checkLetBindings lbs (ret EmptyTel)
+
+-- | After a typed binding has been checked, add the patterns it binds
+addTypedPatterns :: [NamedArg A.Binder] -> TCM a -> TCM a
+addTypedPatterns xps ret = do
+  let ps  = mapMaybe (A.extractPattern . namedArg) xps
+  let lbs = fmap letBinding ps
+  checkLetBindings lbs ret
+
+  where
+
+    letBinding :: (A.Pattern, A.BindName) -> A.LetBinding
+    letBinding (p, n) = A.LetPatBind (A.LetRange r) p (A.Var $ A.unBind n)
+      where r = fuseRange p n
+
+
+-- | Check a tactic attribute. Should have type Term → TC ⊤.
+checkTacticAttribute :: LamOrPi -> A.Expr -> TCM Term
+checkTacticAttribute LamNotPi e = genericDocError =<< "The @tactic attribute is not allowed here"
+checkTacticAttribute PiNotLam e = do
+  expectedType <- el primAgdaTerm --> el (primAgdaTCM <#> primLevelZero <@> primUnit)
+  checkExpr e expectedType
 
 ifPath :: Type -> TCM a -> TCM a -> TCM a
 ifPath ty fallback work = do
@@ -312,8 +337,8 @@ ifPath ty fallback work = do
   if isPathType pv then work else fallback
 
 checkPath :: A.TypedBinding -> A.Expr -> Type -> TCM Term
-checkPath b@(A.TBind _ [x'] typ) body ty = do
-    let x    = (fmap . fmap) A.unBind x'
+checkPath b@(A.TBind _ _ [x'] typ) body ty = do
+    let x    = updateNamedArg (A.unBind . A.binderName) x'
         info = getArgInfo x
     PathType s path level typ lhs rhs <- pathView ty
     interval <- elInf primInterval
@@ -339,30 +364,33 @@ checkPath b body ty = __IMPOSSIBLE__
 checkLambda :: Comparison -> A.TypedBinding -> A.Expr -> Type -> TCM Term
 checkLambda cmp (A.TLet _ lbs) body target =
   checkLetBindings lbs (checkExpr body target)
-checkLambda cmp b@(A.TBind _ xs' typ) body target = do
-  reportSLn "tc.term.lambda" 60 $ "checkLambda   xs = " ++ prettyShow xs
-  let numbinds = length xs
-      possiblePath = numbinds == 1
-                   && (case unScope typ of
-                         A.Underscore{} -> True
-                         _              -> False)
-                   && isRelevant info && visible info
-  reportSLn "tc.term.lambda" 60 $ "possiblePath = " ++ show (possiblePath, numbinds, unScope typ, info)
+checkLambda cmp b@(A.TBind _ _ xps typ) body target = do
+  reportSDoc "tc.term.lambda" 60 $ vcat
+    [ "checkLambda xs = " <+> prettyA xps
+    , "possiblePath = " <+> text (show (possiblePath, numbinds, unScope typ, info))
+    ]
   TelV tel btyp <- telViewUpTo numbinds target
   if size tel < numbinds || numbinds /= 1
     then (if possiblePath then trySeeingIfPath else dontUseTargetType)
     else useTargetType tel btyp
+
   where
-    xs = (map . fmap . fmap) A.unBind xs'
-    info : _ = map getArgInfo xs
+
+    xs = map (updateNamedArg (A.unBind . A.binderName)) xps
+    numbinds = length xps
+    isUnderscore e = case e of { A.Underscore{} -> True; _ -> False }
+    possiblePath = numbinds == 1 && isUnderscore (unScope typ)
+                   && isRelevant info && visible info
+    info = getArgInfo (headWithDefault __IMPOSSIBLE__ xs)
+
     trySeeingIfPath = do
       cubical <- optCubical <$> pragmaOptions
-      reportSLn "tc.term.lambda" 60 $ "trySeeingIfPath for " ++ show xs
+      reportSLn "tc.term.lambda" 60 $ "trySeeingIfPath for " ++ show xps
       let postpone' = if cubical then postpone else \ _ _ -> dontUseTargetType
       ifBlocked target postpone' $ \ _ t -> do
-          ifPath t dontUseTargetType $
-            if cubical then checkPath b body t
-                       else typeError $ GenericError $ "Option --cubical needed to build a path with a lambda abstraction"
+        ifPath t dontUseTargetType $ if cubical
+          then checkPath b body t
+          else genericError "Option --cubical needed to build a path with a lambda abstraction"
 
     postpone m tgt = postponeTypeCheckingProblem_ $
       CheckExpr cmp (A.Lam A.exprNoRange (A.DomainFull b) body) tgt
@@ -386,19 +414,22 @@ checkLambda cmp b@(A.TBind _ xs' typ) body target = do
       reportSDoc "tc.term.lambda" 60 $ "dontUseTargetType tel =" <+> pretty tel
       -- DONT USE tel for addContext, as it loses NameIds.
       -- WRONG: t1 <- addContext tel $ workOnTypes newTypeMeta_
-      t1 <- addContext (xs, argsT) $ workOnTypes newTypeMeta_
+      t1 <- addContext (xs, argsT) $  addTypedPatterns xps $
+              workOnTypes newTypeMeta_
       -- Do not coerce hidden lambdas
       if notVisible info || any notVisible xs then do
         pid <- newProblem_ $ leqType (telePi tel t1) target
         -- Now check body : ?t₁
         -- WRONG: v <- addContext tel $ checkExpr body t1
-        v <- addContext (xs, argsT) $ checkExpr' cmp body t1
+        v <- addContext (xs, argsT) $ addTypedPatterns xps $
+               checkExpr' cmp body t1
         -- Block on the type comparison
         blockTermOnProblem target (teleLam tel v) pid
        else do
         -- Now check body : ?t₁
         -- WRONG: v <- addContext tel $ checkExpr body t1
-        v <- addContext (xs, argsT) $ checkExpr' cmp body t1
+        v <- addContext (xs, argsT) $ addTypedPatterns xps $
+               checkExpr' cmp body t1
         -- Block on the type comparison
         coerce cmp (teleLam tel v) (telePi tel t1) target
 
@@ -421,7 +452,8 @@ checkLambda cmp b@(A.TBind _ xs' typ) body target = do
         -- check.
         (pid, argT) <- newProblem $ isTypeEqualTo typ a
         -- Andreas, Issue 630: take name from function type if lambda name is "_"
-        v <- lambdaAddContext (namedArg x) y (defaultArgDom info argT) $ checkExpr' cmp body btyp
+        v <- lambdaAddContext (namedArg x) y (defaultArgDom info argT) $
+               addTypedPatterns xps $ checkExpr' cmp body btyp
         blockTermOnProblem target (Lam info $ Abs (namedArgName x) v) pid
 
     useTargetType _ _ = __IMPOSSIBLE__
@@ -430,7 +462,7 @@ checkLambda cmp b@(A.TBind _ xs' typ) body target = do
 --   coming from the function type.
 --   If lambda has no user-given modality, copy that of function type.
 lambdaModalityCheck :: LensModality dom => dom -> ArgInfo -> TCM ArgInfo
-lambdaModalityCheck dom = lambdaQuantityCheck m <=< lambdaIrrelevanceCheck m
+lambdaModalityCheck dom = lambdaCohesionCheck m <=< lambdaQuantityCheck m <=< lambdaIrrelevanceCheck m
   where m = getModality dom
 
 -- | Check that irrelevance info in lambda is compatible with irrelevance
@@ -462,15 +494,30 @@ lambdaIrrelevanceCheck dom info
 lambdaQuantityCheck :: LensQuantity dom => dom -> ArgInfo -> TCM ArgInfo
 lambdaQuantityCheck dom info
     -- Case: no specific user annotation: use quantity of function type
-  | getQuantity info == defaultQuantity = return $ setQuantity (getQuantity dom) info
+  | noUserQuantity info = return $ setQuantity (getQuantity dom) info
     -- Case: explicit user annotation is taken seriously
   | otherwise = do
       let qPi  = getQuantity dom  -- quantity of function type
       let qLam = getQuantity info -- quantity of lambda
-      unless (moreQuantity qPi qLam) $ do
-        -- the expected use qPi cannot be unrestricted
-        when (qPi == Quantityω) __IMPOSSIBLE__
+      unless (qPi `moreQuantity` qLam) $ do
         typeError WrongQuantityInLambda
+      return info
+
+-- | Check that cohesion info in lambda is compatible with cohesion
+--   coming from the function type.
+--   If lambda has no user-given cohesion, copy that of function type.
+lambdaCohesionCheck :: LensCohesion dom => dom -> ArgInfo -> TCM ArgInfo
+lambdaCohesionCheck dom info
+    -- Case: no specific user annotation: use cohesion of function type
+  | getCohesion info == defaultCohesion = return $ setCohesion (getCohesion dom) info
+    -- Case: explicit user annotation is taken seriously
+  | otherwise = do
+      let cPi  = getCohesion dom  -- cohesion of function type
+      let cLam = getCohesion info -- cohesion of lambda
+      unless (cPi `sameCohesion` cLam) $ do
+        -- if there is a cohesion annotation then
+        -- it better match the domain.
+        typeError WrongCohesionInLambda
       return info
 
 lambdaAddContext :: Name -> ArgName -> Dom Type -> TCM a -> TCM a
@@ -498,6 +545,7 @@ checkPostponedLambda cmp args@(Arg info (WithHiding h x : xs, mt)) body target =
     -- to get better error messages.
     -- Using the type dom from the usage context would be more precise,
     -- though.
+    -- TODO: quantity
     let dom' = setRelevance (getRelevance info') . setHiding lamHiding $
           maybe dom (dom $>) mt
     v <- lambdaAddContext x (absName b) dom'  $
@@ -531,8 +579,8 @@ insertHiddenLambdas h target postpone ret = do
           -- That's an error, as we cannot insert a visible lambda.
           if visible h' then typeError $ WrongHidingInLambda target else do
             -- Otherwise, we found a hidden argument that we can insert.
-            let x = absName b
-            Lam (domInfo dom) . Abs x <$> do
+            let x    = absName b
+            Lam (setOrigin Inserted $ domInfo dom) . Abs x <$> do
               addContext (x, dom) $ insertHiddenLambdas h (absBody b) postpone ret
 
       _ -> typeError . GenericDocError =<< do
@@ -555,15 +603,15 @@ checkAbsurdLambda cmp i h e t = do
           -- Add helper function
           top <- currentModule
           aux <- qualify top <$> freshName_ (getRange i, absurdLambdaName)
-          -- if we are in irrelevant position, the helper function
-          -- is added as irrelevant
-          rel <- asksTC envRelevance
+          -- if we are in irrelevant / erased position, the helper function
+          -- is added as irrelevant / erased
+          mod <- asksTC getModality
           reportSDoc "tc.term.absurd" 10 $ vcat
-            [ ("Adding absurd function" <+> prettyTCM rel) <> prettyTCM aux
+            [ ("Adding absurd function" <+> prettyTCM mod) <> prettyTCM aux
             , nest 2 $ "of type" <+> prettyTCM t'
             ]
           addConstant aux $
-            (\ d -> (defaultDefn (setRelevance rel info') aux t' d)
+            (\ d -> (defaultDefn (setModality mod info') aux t' d)
                     { defPolarity       = [Nonvariant]
                     , defArgOccurrences = [Unused] })
             $ emptyFunction
@@ -572,9 +620,9 @@ checkAbsurdLambda cmp i h e t = do
                     { clauseLHSRange  = getRange e
                     , clauseFullRange = getRange e
                     , clauseTel       = telFromList [fmap (absurdPatternName,) dom]
-                    , namedClausePats = [Arg info' $ Named (Just $ unranged $ absName b) $ absurdP 0]
+                    , namedClausePats = [Arg info' $ Named (Just $ WithOrigin Inserted $ unranged $ absName b) $ absurdP 0]
                     , clauseBody      = Nothing
-                    , clauseType      = Just $ setRelevance rel $ defaultArg $ absBody b
+                    , clauseType      = Just $ setModality mod $ defaultArg $ absBody b
                     , clauseCatchall  = False
                     , clauseUnreachable = Just True -- absurd clauses are unreachable
                     }
@@ -603,8 +651,8 @@ checkExtendedLambda cmp i di qname cs e t = do
    t <- instantiateFull t
    ifBlocked t (\ m t' -> postponeTypeCheckingProblem_ $ CheckExpr cmp e t') $ \ _ t -> do
      j   <- currentOrFreshMutualBlock
-     rel <- asksTC envRelevance
-     let info = setRelevance rel defaultArgInfo
+     mod <- asksTC getModality
+     let info = setModality mod defaultArgInfo
 
      reportSDoc "tc.term.exlam" 20 $
        (text (show $ A.defAbstract di) <+>
@@ -835,9 +883,9 @@ checkRecordExpression cmp mfs e t = do
       case rs of
           -- If there are no records with the right fields we might as well fail right away.
         [] -> case fields of
-          []  -> typeError $ GenericError "There are no records in scope"
-          [f] -> typeError $ GenericError $ "There is no known record with the field " ++ prettyShow f
-          _   -> typeError $ GenericError $ "There is no known record with the fields " ++ unwords (map prettyShow fields)
+          []  -> genericError "There are no records in scope"
+          [f] -> genericError $ "There is no known record with the field " ++ prettyShow f
+          _   -> genericError $ "There is no known record with the fields " ++ unwords (map prettyShow fields)
           -- If there's only one record with the appropriate fields, go with that.
         [r] -> do
           def <- getConstInfo r
@@ -961,7 +1009,7 @@ checkExpr' cmp e t0 =
         A.App i s arg@(Arg ai l)
           | A.Set _ 0 <- unScope s, visible ai ->
           ifNotM hasUniversePolymorphism
-              (typeError $ GenericError "Use --universe-polymorphism to enable level arguments to Set")
+              (genericError "Use --universe-polymorphism to enable level arguments to Set")
           $ {- else -} do
             -- allow NonStrict variables when checking level
             --   Set : (NonStrict) Level -> Set\omega
@@ -976,7 +1024,7 @@ checkExpr' cmp e t0 =
         A.App i s arg@(Arg ai l)
           | A.Prop _ 0 <- unScope s, visible ai ->
           ifNotM hasUniversePolymorphism
-              (typeError $ GenericError "Use --universe-polymorphism to enable level arguments to Prop")
+              (genericError "Use --universe-polymorphism to enable level arguments to Prop")
           $ {- else -} do
             n <- applyRelevanceToContext NonStrict $ checkLevel arg
             reportSDoc "tc.univ.poly" 10 $
@@ -990,13 +1038,13 @@ checkExpr' cmp e t0 =
               quoted (A.Macro x) = return x
               quoted (A.Proj o p) | Just x <- getUnambiguous p = return x
               quoted (A.Proj o p)  =
-                typeError $ GenericError $ "quote: Ambigous name: " ++ prettyShow (unAmbQ p)
+                genericError $ "quote: Ambigous name: " ++ prettyShow (unAmbQ p)
               quoted (A.Con c) | Just x <- getUnambiguous c = return x
               quoted (A.Con c)  =
-                typeError $ GenericError $ "quote: Ambigous name: " ++ prettyShow (unAmbQ c)
+                genericError $ "quote: Ambigous name: " ++ prettyShow (unAmbQ c)
               quoted (A.ScopedExpr _ e) = quoted e
               quoted _                  =
-                typeError $ GenericError $ "quote: not a defined name"
+                genericError "quote: not a defined name"
           x <- quoted (namedThing e)
           ty <- qNameType
           coerce cmp (quoteName x) ty t
@@ -1005,9 +1053,9 @@ checkExpr' cmp e t0 =
              (et, _) <- inferExpr (namedThing e)
              doQuoteTerm cmp et t
 
-        A.Quote _ -> typeError $ GenericError "quote must be applied to a defined name"
-        A.QuoteTerm _ -> typeError $ GenericError "quoteTerm must be applied to a term"
-        A.Unquote _ -> typeError $ GenericError "unquote must be applied to a term"
+        A.Quote{}     -> genericError "quote must be applied to a defined name"
+        A.QuoteTerm{} -> genericError "quoteTerm must be applied to a term"
+        A.Unquote{}   -> genericError "unquote must be applied to a term"
 
         A.AbsurdLam i h -> checkAbsurdLambda cmp i h e t
 
@@ -1015,8 +1063,9 @@ checkExpr' cmp e t0 =
 
         A.Lam i (A.DomainFull b) e -> checkLambda cmp b e t
 
-        A.Lam i (A.DomainFree x) e0
-          | isNothing (nameOf $ unArg x) -> checkExpr' cmp (A.Lam i (domainFree (getArgInfo x) $ A.unBind $ namedArg x) e0) t
+        A.Lam i (A.DomainFree _ x) e0
+          | isNothing (nameOf $ unArg x) && isNothing (A.binderPattern $ namedArg x) ->
+              checkExpr' cmp (A.Lam i (domainFree (getArgInfo x) $ fmap A.unBind $ namedArg x) e0) t
           | otherwise -> typeError $ NotImplemented "named arguments in lambdas"
 
         A.Lit lit    -> checkLiteral lit t
@@ -1052,9 +1101,10 @@ checkExpr' cmp e t0 =
 
         A.Fun _ (Arg info a) b -> do
             a' <- isType_ a
+            let adom = defaultArgDom info a'
             b' <- isType_ b
-            s  <- inferFunSort (getSort a') (getSort b')
-            let v = Pi (defaultArgDom info a') (NoAbs underscore b')
+            s  <- inferFunSort adom (getSort b')
+            let v = Pi adom (NoAbs underscore b')
             noFunctionsIntoSize b' $ El s v
             coerce cmp v (sort s) t
         A.Set _ n    -> do
@@ -1068,7 +1118,7 @@ checkExpr' cmp e t0 =
         A.RecUpdate ei recexpr fs -> checkRecordUpdate cmp ei recexpr fs e t
 
         A.DontCare e -> -- resurrect vars
-          ifM ((Irrelevant ==) <$> asksTC envRelevance)
+          ifM ((Irrelevant ==) <$> asksTC getRelevance)
             (dontCare <$> do applyRelevanceToContext Irrelevant $ checkExpr' cmp e t)
             (internalError "DontCare may only appear in irrelevant contexts")
 
@@ -1105,7 +1155,7 @@ checkExpr' cmp e t0 =
 
         A.ETel _   -> __IMPOSSIBLE__
 
-        A.Dot{} -> typeError $ GenericError $ "Invalid dotted expression"
+        A.Dot{} -> genericError "Invalid dotted expression"
 
         -- Application
         _   | Application hd args <- appView e -> checkApplication cmp hd args e t
@@ -1125,14 +1175,15 @@ checkExpr' cmp e t0 =
   tryInsertHiddenLambda :: A.Expr -> Type -> TCM Term -> TCM Term
   tryInsertHiddenLambda e t fallback
     -- Insert hidden lambda if all of the following conditions are met:
-        -- type is a hidden function type, {x : A} -> B or {{x : A}} -> B
+    -- type is a hidden function type, {x : A} -> B or {{x : A}} -> B
+    -- expresion is not a lambda with the appropriate hiding yet
     | Pi (Dom{domInfo = info, unDom = a}) b <- unEl t
         , let h = getHiding info
         , notVisible h
         -- expression is not a matching hidden lambda or question mark
         , not (hiddenLambdaOrHole h e)
         = do
-      let proceed = doInsert info $ absName b
+      let proceed = doInsert (setOrigin Inserted info) $ absName b
       -- If we skip the lambda insertion for an introduction,
       -- we will hit a dead end, so proceed no matter what.
       if definitelyIntroduction then proceed else do
@@ -1154,7 +1205,7 @@ checkExpr' cmp e t0 =
     doInsert info y = do
       x <- C.setNotInScope <$> freshName rx y
       reportSLn "tc.term.expr.impl" 15 $ "Inserting implicit lambda"
-      checkExpr' cmp (A.Lam (A.ExprRange re) (domainFree info x) e) t
+      checkExpr' cmp (A.Lam (A.ExprRange re) (domainFree info $ A.mkBinder x) e) t
 
     hiddenLambdaOrHole h e = case e of
       A.AbsurdLam _ h'        -> sameHiding h h'
@@ -1226,6 +1277,9 @@ unquoteM tacA hole holeType = do
 --   given by the third argument. Runs the continuation if successful.
 unquoteTactic :: Term -> Term -> Type -> TCM ()
 unquoteTactic tac hole goal = do
+  reportSDoc "tc.term.tactic" 40 $ sep
+    [ "Running tactic" <+> prettyTCM tac
+    , nest 2 $ "on" <+> prettyTCM hole <+> ":" <+> prettyTCM goal ]
   ok  <- runUnquoteM $ unquoteTCM tac hole
   case ok of
     Left (BlockedOnMeta oldState x) -> do
@@ -1293,7 +1347,7 @@ checkOrInferMeta newMeta mt i = do
       let v = MetaV x []
       reportSDoc "tc.meta.check" 20 $
         "checking existing meta " <+> prettyTCM v
-      t' <- jMetaType . mvJudgement <$> lookupMeta x
+      t' <- metaType x
       reportSDoc "tc.meta.check" 20 $
         nest 2 $ "of type " <+> prettyTCM t'
       case mt of
@@ -1302,16 +1356,17 @@ checkOrInferMeta newMeta mt i = do
 
 -- | Turn a domain-free binding (e.g. lambda) into a domain-full one,
 --   by inserting an underscore for the missing type.
-domainFree :: ArgInfo -> A.Name -> A.LamBinding
+domainFree :: ArgInfo -> A.Binder' A.Name -> A.LamBinding
 domainFree info x =
-  A.DomainFull $ A.TBind r [unnamedArg info $ A.BindName x] $ A.Underscore underscoreInfo
+  A.DomainFull $ A.mkTBind r [unnamedArg info $ fmap A.mkBindName x]
+               $ A.Underscore underscoreInfo
   where
     r = getRange x
     underscoreInfo = A.MetaInfo
       { A.metaRange          = r
       , A.metaScope          = emptyScopeInfo
       , A.metaNumber         = Nothing
-      , A.metaNameSuggestion = prettyShow $ A.nameConcrete x
+      , A.metaNameSuggestion = prettyShow $ A.nameConcrete $ A.binderName x
       }
 
 
@@ -1341,11 +1396,17 @@ checkKnownArgument
   -> TCM (Args, Type)   -- ^ Remaining inferred arguments, remaining type.
 checkKnownArgument arg [] _ = genericDocError =<< do
   "Invalid projection parameter " <+> prettyA arg
-checkKnownArgument arg@(Arg info e) (Arg _infov v : vs) t = do
-  (Dom{domInfo = info',unDom = a}, b) <- mustBePi t
+-- Andreas, 2019-07-22, while #3353: we should use domName, not absName !!
+-- WAS:
+-- checkKnownArgument arg@(Arg info e) (Arg _infov v : vs) t = do
+--   (dom@Dom{domInfo = info',unDom = a}, b) <- mustBePi t
+--   -- Skip the arguments from vs that do not correspond to e
+--   if not (sameHiding info info'
+--           && (visible info || maybe True (absName b ==) (bareNameOf e)))
+checkKnownArgument arg (Arg _ v : vs) t = do
   -- Skip the arguments from vs that do not correspond to e
-  if not (sameHiding info info'
-          && (visible info || maybe True ((absName b ==) . rangedThing) (nameOf e)))
+  (dom@Dom{ unDom = a }, b) <- mustBePi t
+  if not $ fromMaybe __IMPOSSIBLE__ $ fittingNamedArg arg dom
     -- Continue with the next one
     then checkKnownArgument arg vs (b `absApp` v)
     -- Found the right argument
@@ -1359,7 +1420,7 @@ checkKnownArgument arg@(Arg info e) (Arg _infov v : vs) t = do
 checkNamedArg :: NamedArg A.Expr -> Type -> TCM Term
 checkNamedArg arg@(Arg info e0) t0 = do
   let e = namedThing e0
-  let x = maybe "" rangedThing $ nameOf e0
+  let x = bareNameWithDefault "" e0
   traceCall (CheckExprCall CmpLeq e t0) $ do
     reportSDoc "tc.term.args.named" 15 $ do
         "Checking named arg" <+> sep
@@ -1491,7 +1552,8 @@ checkLetBinding b@(A.LetPatBind i p e) ret =
       , nest 2 $ vcat
         [ "p (A) =" <+> prettyA p
         , "t     =" <+> prettyTCM t
-        , "cxtRel=" <+> do pretty =<< asksTC envRelevance
+        , "cxtRel=" <+> do pretty =<< asksTC getRelevance
+        , "cxtQnt=" <+> do pretty =<< asksTC getQuantity
         ]
       ]
     fvs <- getContextSize
@@ -1503,7 +1565,8 @@ checkLetBinding b@(A.LetPatBind i p e) ret =
       reportSDoc "tc.term.let.pattern" 20 $ nest 2 $ vcat
         [ "p (I) =" <+> prettyTCM p
         , "delta =" <+> prettyTCM delta
-        , "cxtRel=" <+> do pretty =<< asksTC envRelevance
+        , "cxtRel=" <+> do pretty =<< asksTC getRelevance
+        , "cxtQnt=" <+> do pretty =<< asksTC getQuantity
         ]
       reportSDoc "tc.term.let.pattern" 80 $ nest 2 $ vcat
         [ "p (I) =" <+> (text . show) p

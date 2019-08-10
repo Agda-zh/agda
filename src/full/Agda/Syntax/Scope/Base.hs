@@ -7,9 +7,7 @@ module Agda.Syntax.Scope.Base where
 
 import Prelude hiding ( null )
 
-import Control.Arrow (first, second, (***))
-import Control.Applicative hiding (empty)
-import Control.DeepSeq
+import Control.Arrow (first, second)
 import Control.Monad
 
 import Data.Either (partitionEithers)
@@ -124,7 +122,7 @@ type LocalVars = AssocList C.Name LocalVar
 
 -- | For each bound variable, we want to know whether it was bound by a
 --   λ, Π, module telescope, pattern, or @let@.
-data Binder
+data BindingSource
   = LambdaBound  -- ^ @λ@ (currently also used for @Π@ and module parameters)
   | PatternBound -- ^ @f ... =@
   | LetBound     -- ^ @let ... in@
@@ -134,11 +132,11 @@ data Binder
 --   In case of reference to a shadowed variable, we want to report
 --   a scope error.
 data LocalVar = LocalVar
-  { localVar        :: A.Name
+  { localVar           :: A.Name
     -- ^ Unique ID of local variable.
-  , localBinder     :: Binder
+  , localBindingSource :: BindingSource
     -- ^ Kind of binder used to introduce the variable (@λ@, @let@, ...).
-  , localShadowedBy :: [AbstractName]
+  , localShadowedBy    :: [AbstractName]
      -- ^ If this list is not empty, the local variable is
      --   shadowed by one or more imports.
   }
@@ -163,7 +161,8 @@ shadowLocal ys (LocalVar x b zs) = LocalVar x b (ys ++ zs)
 -- | Treat patternBound variable as a module parameter
 patternToModuleBound :: LocalVar -> LocalVar
 patternToModuleBound x
- | localBinder x == PatternBound = x { localBinder = LambdaBound }
+ | localBindingSource x == PatternBound =
+   x { localBindingSource = LambdaBound }
  | otherwise                     = x
 
 -- | Project name of unshadowed local variable.
@@ -301,15 +300,26 @@ inNameSpace = case inScopeTag :: InScopeTag a of
 -- | For the sake of parsing left-hand sides, we distinguish
 --   constructor and record field names from defined names.
 data KindOfName
-  = ConName        -- ^ Constructor name.
-  | FldName        -- ^ Record field name.
-  | DefName        -- ^ Ordinary defined name.
-  | PatternSynName -- ^ Name of a pattern synonym.
-  | GeneralizeName -- ^ Name to be generalized
+  = ConName                  -- ^ Constructor name.
+  | FldName                  -- ^ Record field name.
+  | PatternSynName           -- ^ Name of a pattern synonym.
+  | GeneralizeName           -- ^ Name to be generalized
   | DisallowedGeneralizeName -- ^ Generalizable variable from a let open
-  | MacroName      -- ^ Name of a macro
-  | QuotableName   -- ^ A name that can only be quoted.
+  | MacroName                -- ^ Name of a macro
+  | QuotableName             -- ^ A name that can only be quoted.
+  -- Previous category @DefName@:
+  -- (Refined in a flat manner as Enum and Bounded are not hereditary.)
+  | DataName                 -- ^ Name of a @data@.
+  | RecName                  -- ^ Name of a @record@.
+  | FunName                  -- ^ Name of a defined function.
+  | AxiomName                -- ^ Name of a @postulate@.
+  | PrimName                 -- ^ Name of a @primitive@.
+  | OtherDefName             -- ^ A @DefName@, but either other kind or don't know which kind.
+  -- End @DefName@.  Keep these together in sequence, for sake of @isDefName@!
   deriving (Eq, Show, Data, Enum, Bounded)
+
+isDefName :: KindOfName -> Bool
+isDefName = (`elem` [DataName .. OtherDefName])
 
 -- | A list containing all name kinds.
 allKindsOfNames :: [KindOfName]
@@ -379,8 +389,8 @@ lensAmodName f am = f (amodName am) <&> \ m -> am { amodName = m }
 data ResolvedName
   = -- | Local variable bound by λ, Π, module telescope, pattern, @let@.
     VarName
-    { resolvedVar      :: A.Name
-    , resolvedBinder   :: Binder    -- ^ What kind of binder?
+    { resolvedVar           :: A.Name
+    , resolvedBindingSource :: BindingSource    -- ^ What kind of binder?
     }
 
   | -- | Function, data/record type, postulate.
@@ -1055,7 +1065,7 @@ recomputeInverseScopeMaps scope = billToPure [ Scoping , InverseScopeLookup ] $
       (m, s)  <- scopes
       (x, ms) <- Map.toList (allNamesInScope s)
       q       <- anameName <$> ms
-      if elem m current
+      if m `elem` current
         then return (q, singleton (C.QName x))
         else do
           y <- findModule m

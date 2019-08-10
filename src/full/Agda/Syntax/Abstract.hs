@@ -12,7 +12,7 @@ module Agda.Syntax.Abstract
     ) where
 
 import Prelude
-import Control.Arrow (first, second, (***))
+import Control.Arrow (first)--, second, (***))
 
 import Data.Foldable (Foldable)
 import qualified Data.Foldable as Fold
@@ -23,35 +23,25 @@ import Data.Sequence (Seq, (<|), (><))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Data.Set (Set)
-import Data.Traversable
 import Data.Void
-
 import Data.Data (Data)
 import Data.Monoid (mappend)
 
-import Agda.Syntax.Concrete.Name (NumHoles(..))
-import Agda.Syntax.Concrete (FieldAssignment'(..), exprFieldA, HoleContent'(..))
+import Agda.Syntax.Concrete (FieldAssignment'(..), exprFieldA)--, HoleContent'(..))
 import qualified Agda.Syntax.Concrete as C
-import Agda.Syntax.Concrete.Pretty ()
-
 import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Abstract.Name as A (QNamed)
-
 import qualified Agda.Syntax.Internal as I
-
 import Agda.Syntax.Common
 import Agda.Syntax.Info
-import Agda.Syntax.Fixity ( Fixity' )
 import Agda.Syntax.Literal
 import Agda.Syntax.Position
 import Agda.Syntax.Scope.Base
 
 import Agda.TypeChecking.Positivity.Occurrence
 
-import Agda.Utils.Functor
 import Agda.Utils.Geniplate
 import Agda.Utils.Lens
-import Agda.Utils.NonemptyList
 import Agda.Utils.Pretty
 
 import Agda.Utils.Impossible
@@ -65,15 +55,18 @@ import Agda.Utils.Impossible
 -- e.g. in @{_ : A} -> ..@ vs. @{r : A} -> ..@.
 
 newtype BindName = BindName { unBind :: Name }
-  deriving (Show, Data, HasRange, SetRange, KillRange)
+  deriving (Show, Data, HasRange, KillRange, SetRange)
+
+mkBindName :: Name -> BindName
+mkBindName x = BindName x
 
 instance Eq BindName where
-  (BindName n) == (BindName m)
+  BindName n == BindName m
     = ((==) `on` nameId) n m
       && ((==) `on` nameConcrete) n m
 
 instance Ord BindName where
-  (BindName n) `compare` (BindName m)
+  BindName n `compare` BindName m
     = (compare `on` nameId) n m
       `mappend` (compare `on` nameConcrete) n m
 
@@ -267,12 +260,35 @@ type TypeSignature  = Declaration
 type Constructor    = TypeSignature
 type Field          = TypeSignature
 
+type TacticAttr = Maybe Expr
+
+-- A Binder @x\@p@, the pattern is optional
+data Binder' a = Binder
+  { binderPattern :: Maybe Pattern
+  , binderName    :: a
+  } deriving (Data, Show, Eq, Functor, Foldable, Traversable)
+
+type Binder = Binder' BindName
+
+mkBinder :: a -> Binder' a
+mkBinder = Binder Nothing
+
+mkBinder_ :: Name -> Binder
+mkBinder_ = mkBinder . mkBindName
+
+extractPattern :: Binder' a -> Maybe (Pattern, a)
+extractPattern (Binder p a) = (,a) <$> p
+
 -- | A lambda binding is either domain free or typed.
 data LamBinding
-  = DomainFree (NamedArg BindName)  -- ^ . @x@ or @{x}@ or @.x@ or @{x = y}@
-  | DomainFull TypedBinding         -- ^ . @(xs:e)@ or @{xs:e}@ or @(let Ds)@
+  = DomainFree TacticAttr (NamedArg Binder)
+    -- ^ . @x@ or @{x}@ or @.x@ or @{x = y}@ or @x\@p@ or @(p)@
+  | DomainFull TypedBinding
+    -- ^ . @(xs:e)@ or @{xs:e}@ or @(let Ds)@
   deriving (Data, Show, Eq)
 
+mkDomainFree :: NamedArg Binder -> LamBinding
+mkDomainFree = DomainFree Nothing
 
 -- | A typed binding.  Appears in dependent function spaces, typed lambdas, and
 --   telescopes.  It might be tempting to simplify this to only bind a single
@@ -289,12 +305,14 @@ data LamBinding
 --   that the metas of the copy are aliases of the metas of the original.
 
 data TypedBinding
-  = TBind Range [NamedArg BindName] Expr
+  = TBind Range TacticAttr [NamedArg Binder] Expr
     -- ^ As in telescope @(x y z : A)@ or type @(x y z : A) -> B@.
   | TLet Range [LetBinding]
     -- ^ E.g. @(let x = e)@ or @(let open M)@.
   deriving (Data, Show, Eq)
 
+mkTBind :: Range -> [NamedArg Binder] -> Expr -> TypedBinding
+mkTBind r = TBind r Nothing
 
 type Telescope  = [TypedBinding]
 
@@ -359,6 +377,7 @@ noWhereDecls = WhereDecls Nothing []
 
 type Clause = Clause' LHS
 type SpineClause = Clause' SpineLHS
+type RewriteEqn  = RewriteEqn' Pattern (QName, Expr)
 
 data RHS
   = RHS
@@ -372,7 +391,7 @@ data RHS
   | WithRHS QName [Expr] [Clause]
       -- ^ The 'QName' is the name of the with function.
   | RewriteRHS
-    { rewriteExprs      :: [(QName, Expr)]
+    { rewriteExprs      :: [RewriteEqn]
       -- ^ The 'QName's are the names of the generated with functions,
       --   one for each 'Expr'.
     , rewriteStrippedPats :: [ProblemEq]
@@ -494,7 +513,7 @@ instance IsProjP Expr where
     Things we parse but are not part of the Agda file syntax
  --------------------------------------------------------------------------}
 
-type HoleContent = C.HoleContent' Expr
+type HoleContent = C.HoleContent' Pattern Expr
 
 {--------------------------------------------------------------------------
     Instances
@@ -571,24 +590,27 @@ instance Underscore Expr where
   isUnderscore = __IMPOSSIBLE__
 
 instance LensHiding LamBinding where
-  getHiding   (DomainFree x)  = getHiding x
-  getHiding   (DomainFull tb) = getHiding tb
-  mapHiding f (DomainFree x)  = DomainFree $ mapHiding f x
-  mapHiding f (DomainFull tb) = DomainFull $ mapHiding f tb
+  getHiding   (DomainFree _ x) = getHiding x
+  getHiding   (DomainFull tb)  = getHiding tb
+  mapHiding f (DomainFree t x) = DomainFree t $ mapHiding f x
+  mapHiding f (DomainFull tb)  = DomainFull $ mapHiding f tb
 
 instance LensHiding TypedBinding where
-  getHiding (TBind _ (x : _) _) = getHiding x   -- Slightly dubious
-  getHiding (TBind _ [] _)      = __IMPOSSIBLE__
-  getHiding TLet{}              = mempty
-  mapHiding f (TBind r xs e) = TBind r ((map . mapHiding) f xs) e
-  mapHiding f b@TLet{}       = b
+  getHiding (TBind _ _ (x : _) _) = getHiding x   -- Slightly dubious
+  getHiding (TBind _ _ [] _)      = __IMPOSSIBLE__
+  getHiding TLet{}                = mempty
+  mapHiding f (TBind r t xs e)    = TBind r t ((map . mapHiding) f xs) e
+  mapHiding f b@TLet{}            = b
+
+instance HasRange a => HasRange (Binder' a) where
+  getRange (Binder p n) = fuseRange p n
 
 instance HasRange LamBinding where
-    getRange (DomainFree x) = getRange x
-    getRange (DomainFull b) = getRange b
+    getRange (DomainFree _ x) = getRange x
+    getRange (DomainFull b)   = getRange b
 
 instance HasRange TypedBinding where
-    getRange (TBind r _ _) = r
+    getRange (TBind r _ _ _) = r
     getRange (TLet r _)    = r
 
 instance HasRange Expr where
@@ -679,7 +701,7 @@ instance HasRange RHS where
     getRange AbsurdRHS                = noRange
     getRange (RHS e _)                = getRange e
     getRange (WithRHS _ e cs)         = fuseRange e cs
-    getRange (RewriteRHS xes _ rhs wh) = getRange (map snd xes, rhs, wh)
+    getRange (RewriteRHS xes _ rhs wh) = getRange (map (snd <$>) xes, rhs, wh)
 
 instance HasRange WhereDeclarations where
   getRange (WhereDecls _ ds) = getRange ds
@@ -707,9 +729,12 @@ instance SetRange (Pattern' a) where
     setRange r (EqualP _ es)        = EqualP (PatRange r) es
     setRange r (WithP i p)          = WithP (setRange r i) p
 
+instance KillRange a => KillRange (Binder' a) where
+  killRange (Binder a b) = killRange2 Binder a b
+
 instance KillRange LamBinding where
-  killRange (DomainFree x) = killRange1 DomainFree x
-  killRange (DomainFull b) = killRange1 DomainFull b
+  killRange (DomainFree t x) = killRange2 DomainFree t x
+  killRange (DomainFull b)   = killRange1 DomainFull b
 
 instance KillRange GeneralizeTelescope where
   killRange (GeneralizeTel s tel) = GeneralizeTel s (killRange tel)
@@ -718,8 +743,8 @@ instance KillRange DataDefParams where
   killRange (DataDefParams s tel) = DataDefParams s (killRange tel)
 
 instance KillRange TypedBinding where
-  killRange (TBind r xs e) = killRange3 TBind r xs e
-  killRange (TLet r lbs)   = killRange2 TLet r lbs
+  killRange (TBind r t xs e) = killRange4 TBind r t xs e
+  killRange (TLet r lbs)     = killRange2 TLet r lbs
 
 instance KillRange Expr where
   killRange (Var x)                = killRange1 Var x
@@ -849,6 +874,7 @@ instanceUniverseBiT' [] [t| (Declaration, NamedArg LHSCore)  |]
 instanceUniverseBiT' [] [t| (Declaration, NamedArg BindName) |]
 instanceUniverseBiT' [] [t| (Declaration, NamedArg Expr)     |]
 instanceUniverseBiT' [] [t| (Declaration, NamedArg Pattern)  |]
+instanceUniverseBiT' [] [t| (Declaration, Quantity)          |]
 
 ------------------------------------------------------------------------
 -- Queries
@@ -904,11 +930,17 @@ instance AllNames Declaration where
 instance AllNames Clause where
   allNames cl = allNames (clauseRHS cl, clauseWhereDecls cl)
 
+instance AllNames e => AllNames (RewriteEqn' p e) where
+    allNames = \case
+      Rewrite es -> Fold.foldMap allNames es
+      Invert pes -> Fold.foldMap (Fold.foldMap allNames) pes
+
 instance AllNames RHS where
   allNames (RHS e _)                 = allNames e
   allNames AbsurdRHS{}               = Seq.empty
   allNames (WithRHS q _ cls)         = q <| allNames cls
-  allNames (RewriteRHS qes _ rhs cls) = Seq.fromList (map fst qes) >< allNames rhs >< allNames cls
+  allNames (RewriteRHS qes _ rhs cls) =
+    allNames (map (fst <$>) qes) >< allNames rhs >< allNames cls
 
 instance AllNames WhereDeclarations where
   allNames (WhereDecls _ ds) = allNames ds
@@ -952,7 +984,7 @@ instance AllNames LamBinding where
   allNames (DomainFull binds) = allNames binds
 
 instance AllNames TypedBinding where
-  allNames (TBind _ _ e) = allNames e
+  allNames (TBind _ t _ e) = allNames (t, e)
   allNames (TLet _ lbs)  = allNames lbs
 
 instance AllNames LetBinding where
@@ -1007,7 +1039,12 @@ class NameToExpr a where
 instance NameToExpr AbstractName where
   nameToExpr d =
     case anameKind d of
-      DefName                  -> Def x
+      DataName                 -> Def x
+      RecName                  -> Def x
+      AxiomName                -> Def x
+      PrimName                 -> Def x
+      FunName                  -> Def x
+      OtherDefName             -> Def x
       GeneralizeName           -> Def x
       DisallowedGeneralizeName -> Def x
       FldName                  -> Proj ProjSystem ux
@@ -1028,7 +1065,7 @@ instance NameToExpr AbstractName where
 instance NameToExpr ResolvedName where
   nameToExpr = \case
     VarName x _          -> Var x
-    DefinedName _ x      -> nameToExpr x  -- Can be 'DefName', 'MacroName', 'QuotableName'.
+    DefinedName _ x      -> nameToExpr x  -- Can be 'isDefName', 'MacroName', 'QuotableName'.
     FieldName xs         -> Proj ProjSystem . AmbQ . fmap anameName $ xs
     ConstructorName xs   -> Con . AmbQ . fmap anameName $ xs
     PatternSynResName xs -> PatternSyn . AmbQ . fmap anameName $ xs
@@ -1062,12 +1099,15 @@ type PatternSynDefns = Map QName PatternSynDefn
 
 lambdaLiftExpr :: [Name] -> Expr -> Expr
 lambdaLiftExpr []     e = e
-lambdaLiftExpr (n:ns) e = Lam exprNoRange (DomainFree $ defaultNamedArg $ BindName n) $
-                            lambdaLiftExpr ns e
-
+lambdaLiftExpr (n:ns) e =
+  Lam exprNoRange (mkDomainFree $ defaultNamedArg $ mkBinder_ n) $
+  lambdaLiftExpr ns e
 
 class SubstExpr a where
   substExpr :: [(Name, Expr)] -> a -> a
+
+instance SubstExpr a => SubstExpr (Maybe a) where
+  substExpr = fmap . substExpr
 
 instance SubstExpr a => SubstExpr [a] where
   substExpr = fmap . substExpr
@@ -1138,12 +1178,17 @@ instance SubstExpr LetBinding where
 
 instance SubstExpr TypedBinding where
   substExpr s tb = case tb of
-    TBind r ns e -> TBind r ns $ substExpr s e
-    TLet r lbs   -> TLet r $ substExpr s lbs
+    TBind r t ns e -> TBind r (substExpr s t) ns $ substExpr s e
+    TLet r lbs     -> TLet r $ substExpr s lbs
 
 -- TODO: more informative failure
-insertImplicitPatSynArgs :: HasRange a => (Range -> a) -> Range -> [Arg Name] -> [NamedArg a] ->
-                            Maybe ([(Name, a)], [Arg Name])
+insertImplicitPatSynArgs
+  :: HasRange a
+  => (Range -> a)
+  -> Range
+  -> [Arg Name]
+  -> [NamedArg a]
+  -> Maybe ([(Name, a)], [Arg Name])
 insertImplicitPatSynArgs wild r ns as = matchArgs r ns as
   where
     matchNextArg r n as@(~(a : as'))
@@ -1152,10 +1197,9 @@ insertImplicitPatSynArgs wild r ns as = matchArgs r ns as
       | otherwise      = return (wild r, as)
 
     matchNext _ [] = False
-    matchNext n (a:as) = sameHiding n a && matchName
+    matchNext n (a:as) = sameHiding n a && maybe True (x ==) (bareNameOf a)
       where
-        x = unranged $ C.nameToRawName $ nameConcrete $ unArg n
-        matchName = maybe True (== x) (nameOf $ unArg a)
+        x = C.nameToRawName $ nameConcrete $ unArg n
 
     matchArgs r [] []     = return ([], [])
     matchArgs r [] as     = Nothing

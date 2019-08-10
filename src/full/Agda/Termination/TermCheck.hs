@@ -19,9 +19,7 @@ module Agda.Termination.TermCheck
 
 import Prelude hiding ( null )
 
-import Control.Applicative hiding (empty)
 import Control.Monad.Reader
-import Control.Monad.State
 
 import Data.Foldable (toList)
 import qualified Data.List as List
@@ -37,7 +35,6 @@ import Agda.Syntax.Internal.Generic
 import qualified Agda.Syntax.Info as Info
 import Agda.Syntax.Position
 import Agda.Syntax.Common
-import Agda.Syntax.Translation.InternalToAbstract ( reifyPatterns )
 
 import Agda.Termination.CutOff
 import Agda.Termination.Monad
@@ -49,14 +46,11 @@ import qualified Agda.Termination.SparseMatrix as Matrix
 import Agda.Termination.Termination (endos, idempotent)
 import qualified Agda.Termination.Termination  as Term
 import Agda.Termination.RecCheck
-import Agda.Termination.Inlining
 
 import Agda.TypeChecking.Datatypes
-import Agda.TypeChecking.EtaContract
 import Agda.TypeChecking.Functions
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Builtin
-import Agda.TypeChecking.Positivity.Occurrence
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Records -- (isRecordConstructor, isInductiveRecord)
 import Agda.TypeChecking.Reduce (reduce, normalise, instantiate, instantiateFull)
@@ -77,7 +71,6 @@ import Agda.Utils.Size
 import Agda.Utils.Maybe
 import Agda.Utils.Monad -- (mapM', forM', ifM, or2M, and2M)
 import Agda.Utils.Null
-import Agda.Utils.Permutation
 import Agda.Utils.Pretty (prettyShow)
 import Agda.Utils.Singleton
 import qualified Agda.Utils.VarSet as VarSet
@@ -297,7 +290,7 @@ reportCalls no calls = do
   -- We work in TCM exclusively.
   liftTCM $ do
 
-    reportS "term.lex" 20 $ unlines
+    reportS "term.lex" 20
       [ "Calls (" ++ no ++ "dot patterns): " ++ prettyShow calls
       ]
 
@@ -594,30 +587,8 @@ maskNonDataArgs ps = zipWith mask ps <$> terGetMaskArgs
 
 
 -- | Extract recursive calls from one clause.
-
 termClause :: Clause -> TerM Calls
 termClause clause = do
-
-  -- If with-function inlining is disallowed (e.g. --without-K),
-  -- we check the original clause.
-
-  let fallback = termClause' clause
-  ifNotM (terGetInlineWithFunctions) fallback $ {- else -} do
-
-    -- Otherwise, we will do inlining, hence, can skip with-generated functions.
-
-    name <- terGetCurrent
-    ifM (isJust <$> isWithFunction name) (return mempty) $ {- else -} do
-
-      -- With inlining, the termination check for all subordinated
-      -- with-functions is included in the parent function.
-
-      (liftTCM $ inlineWithClauses name clause) >>= \case
-        Nothing  -> fallback
-        Just cls -> terSetHaveInlinedWith $ mapM' termClause' cls
-
-termClause' :: Clause -> TerM Calls
-termClause' clause = do
   Clause{ clauseTel = tel, namedClausePats = ps, clauseBody = body } <- etaExpandClause clause
   liftTCM $ reportSDoc "term.check.clause" 25 $ vcat
     [ "termClause"
@@ -705,7 +676,7 @@ instance ExtractCalls Sort where
       SizeUniv   -> return empty
       Type t     -> terUnguarded $ extract t  -- no guarded levels
       Prop t     -> terUnguarded $ extract t
-      PiSort s1 s2 -> extract (s1, s2)
+      PiSort a s -> extract (a, s)
       UnivSort s -> extract s
       MetaS x es -> return empty
       DefS d es  -> return empty
@@ -738,21 +709,10 @@ constructor c ind args = do
              (False, _)           -> const Order.unknown
     terModifyGuarded g' $ extract arg
 
--- | Extract calls from with function application.
-
-withFunction :: QName -> Elims -> TerM Calls
-withFunction g es = do
-  v <- liftTCM $ -- billTo [Benchmark.Termination, Benchmark.With] $  -- 0ms
-         expandWithFunctionCall g es
-  liftTCM $ reportSDoc "term.with.call" 30 $
-    "termination checking expanded with-function call:" <+> prettyTCM v
-  extract v
-
 -- | Handles function applications @g es@.
 
 function :: QName -> Elims -> TerM Calls
-function g es0 = ifM (terGetInlineWithFunctions `and2M` do isJust <$> isWithFunction g) (withFunction g es0)
-  $ {-else, no with function-} do
+function g es0 = do
 
     f       <- terGetCurrent
     names   <- terGetMutual
@@ -1036,11 +996,11 @@ compareArgs es = do
 --   off, if inductive.
 --
 --   UNUSED
-annotatePatsWithUseSizeLt :: [DeBruijnPattern] -> TerM [(Bool,DeBruijnPattern)]
-annotatePatsWithUseSizeLt = loop where
-  loop [] = return []
-  loop (p@(ProjP _ q) : pats) = ((False,p) :) <$> do projUseSizeLt q $ loop pats
-  loop (p : pats) = (\ b ps -> (b,p) : ps) <$> terGetUseSizeLt <*> loop pats
+--annotatePatsWithUseSizeLt :: [DeBruijnPattern] -> TerM [(Bool,DeBruijnPattern)]
+--annotatePatsWithUseSizeLt = loop where
+--  loop [] = return []
+--  loop (p@(ProjP _ q) : pats) = ((False,p) :) <$> do projUseSizeLt q $ loop pats
+--  loop (p : pats) = (\ b ps -> (b,p) : ps) <$> terGetUseSizeLt <*> loop pats
 
 
 -- | @compareElim e dbpat@
@@ -1132,17 +1092,17 @@ composeGuardedness _ _ = __IMPOSSIBLE__
 offsetFromConstructor :: MonadTCM tcm => QName -> tcm Int
 offsetFromConstructor c = maybe 1 (const 0) <$> do
   liftTCM $ isRecordConstructor c
-
--- | Compute the proper subpatterns of a 'DeBruijnPattern'.
-subPatterns :: DeBruijnPattern -> [DeBruijnPattern]
-subPatterns = foldPattern $ \case
-  ConP _ _ ps -> map namedArg ps
-  DefP _ _ ps -> map namedArg ps -- TODO check semantics
-  VarP _ _    -> mempty
-  LitP _      -> mempty
-  DotP _ _    -> mempty
-  ProjP _ _   -> mempty
-  IApplyP{}   -> mempty
+--UNUSED Liang-Ting 2019-07-16
+---- | Compute the proper subpatterns of a 'DeBruijnPattern'.
+--subPatterns :: DeBruijnPattern -> [DeBruijnPattern]
+--subPatterns = foldPattern $ \case
+--  ConP _ _ ps -> map namedArg ps
+--  DefP _ _ ps -> map namedArg ps -- TODO check semantics
+--  VarP _ _    -> mempty
+--  LitP _      -> mempty
+--  DotP _ _    -> mempty
+--  ProjP _ _   -> mempty
+--  IApplyP{}   -> mempty
 
 
 compareTerm :: Term -> Masked DeBruijnPattern -> TerM Order

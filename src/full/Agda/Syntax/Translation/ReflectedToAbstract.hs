@@ -6,8 +6,6 @@ module Agda.Syntax.Translation.ReflectedToAbstract where
 
 import Control.Monad.Reader
 
-import Data.Traversable as Trav hiding (mapM)
-
 import Agda.Syntax.Fixity
 import Agda.Syntax.Literal
 import Agda.Syntax.Position
@@ -16,13 +14,12 @@ import Agda.Syntax.Common
 import Agda.Syntax.Abstract as A hiding (Apply)
 import Agda.Syntax.Abstract.Pattern
 import Agda.Syntax.Reflected as R
-import Agda.Syntax.Internal (Dom(..))
+import Agda.Syntax.Internal (Dom,Dom'(..))
 
 import Agda.TypeChecking.Monad as M hiding (MetaInfo)
 import Agda.Syntax.Scope.Monad (getCurrentModule)
 
 import Agda.Utils.Except
-import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.List
 import Agda.Utils.Functor
@@ -91,9 +88,9 @@ instance ToAbstract [Arg Term] [NamedArg Expr] where
   toAbstract = traverse toAbstract
 
 instance ToAbstract r Expr => ToAbstract (Dom r, Name) (A.TypedBinding) where
-  toAbstract (Dom{domInfo = i,unDom = x}, name) = do
+  toAbstract (Dom{domInfo = i,unDom = x, domTactic = tac}, name) = do
     dom <- toAbstract x
-    return $ TBind noRange [unnamedArg i $ BindName name] dom
+    return $ mkTBind noRange [unnamedArg i $ mkBinder_ name] dom
 
 instance ToAbstract (Expr, Elim) Expr where
   toAbstract (f, Apply arg) = do
@@ -130,7 +127,7 @@ instance ToAbstract Term Expr where
     R.Lam h t  -> do
       (e, name) <- toAbstract t
       let info  = setHiding h $ setOrigin Reflected defaultArgInfo
-      return $ A.Lam exprNoRange (DomainFree $ unnamedArg info $ BindName name) e
+      return $ A.Lam exprNoRange (mkDomainFree $ unnamedArg info $ mkBinder_ name) e
     R.ExtLam cs es -> do
       name <- freshName_ extendedLambdaName
       m    <- getCurrentModule
@@ -169,11 +166,11 @@ instance ToAbstract R.Pattern (Names, A.Pattern) where
       (names, args) <- toAbstractPats args
       return (names, A.ConP (ConPatInfo ConOCon patNoRange ConPatEager) (unambiguous $ killRange c) args)
     R.DotP    -> return ([], A.WildP patNoRange)
-    R.VarP s | isNoName s -> withName "z" $ \ name -> return ([name], A.VarP $ BindName name)
+    R.VarP s | isNoName s -> withName "z" $ \ name -> return ([name], A.VarP $ mkBindName name)
         -- Ulf, 2016-08-09: Also bind noNames (#2129). This to make the
         -- behaviour consistent with lambda and pi.
         -- return ([], A.WildP patNoRange)
-    R.VarP s  -> withName s $ \ name -> return ([name], A.VarP $ BindName name)
+    R.VarP s  -> withName s $ \ name -> return ([name], A.VarP $ mkBindName name)
     R.LitP l  -> return ([], A.LitP l)
     R.AbsurdP -> return ([], A.AbsurdP patNoRange)
     R.ProjP d -> return ([], A.ProjP patNoRange ProjSystem $ unambiguous $ killRange d)

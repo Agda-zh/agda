@@ -73,8 +73,7 @@ variable rule:
 
 module Agda.TypeChecking.Irrelevance where
 
-import Control.Arrow (first, second)
-import Control.Monad.Reader
+import Control.Arrow (second)
 
 import qualified Data.Map as Map
 
@@ -88,12 +87,9 @@ import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Substitute.Class
 
-import Agda.Utils.Except
 import Agda.Utils.Function
 import Agda.Utils.Lens
 import Agda.Utils.Monad
-
-import Agda.Utils.Impossible
 
 -- | data 'Relevance'
 --   see "Agda.Syntax.Common".
@@ -120,7 +116,7 @@ workOnTypes cont = do
 workOnTypes' :: (MonadTCEnv m) => Bool -> m a -> m a
 workOnTypes' experimental
   = modifyContext (map $ mapRelevance f)
-  . applyQuantityToContext Quantity0
+  . applyQuantityToContext zeroQuantity
   . typeLevelReductions
   . localTC (\ e -> e { envWorkingOnTypes = True })
   where
@@ -178,7 +174,7 @@ applyRelevanceToContextFunBody thing cont =
 applyQuantityToContext :: (MonadTCEnv tcm, LensQuantity q) => q -> tcm a -> tcm a
 applyQuantityToContext thing =
   case getQuantity thing of
-    Quantity1 -> id
+    Quantity1{} -> id
     q         -> applyQuantityToContextOnly   q
                . applyQuantityToJudgementOnly q
 
@@ -199,6 +195,25 @@ applyQuantityToContextOnly q = localTC
 --   Precondition: @Quantity /= Quantity1@
 applyQuantityToJudgementOnly :: (MonadTCEnv tcm) => Quantity -> tcm a -> tcm a
 applyQuantityToJudgementOnly = localTC . over eQuantity . composeQuantity
+
+-- | Apply inverse composition with the given cohesion to the typing context.
+applyCohesionToContext :: (MonadTCEnv tcm, LensCohesion m) => m -> tcm a -> tcm a
+applyCohesionToContext thing =
+  case getCohesion thing of
+    m | m == mempty -> id
+      | otherwise   -> applyCohesionToContextOnly   m
+                       -- Cohesion does not apply to the judgment.
+
+applyCohesionToContextOnly :: (MonadTCEnv tcm) => Cohesion -> tcm a -> tcm a
+applyCohesionToContextOnly q = localTC
+  $ over eContext     (map $ inverseApplyCohesion q)
+  . over eLetBindings (Map.map . fmap . second $ inverseApplyCohesion q)
+
+-- | Can we split on arguments of the given cohesion?
+splittableCohesion :: (HasOptions m, LensCohesion a) => a -> m Bool
+splittableCohesion a = do
+  let c = getCohesion a
+  pure (usableCohesion c) `and2M` (pure (c /= Flat) `or2M` do optFlatSplit <$> pragmaOptions)
 
 -- | (Conditionally) wake up irrelevant variables and make them relevant.
 --   For instance,
@@ -231,16 +246,18 @@ applyModalityToContextOnly m = localTC
 applyModalityToJudgementOnly :: (MonadTCEnv tcm) => Modality -> tcm a -> tcm a
 applyModalityToJudgementOnly = localTC . over eModality . composeModality
 
--- | Like 'applyModalityToContext', but only act on context if
+-- | Like 'applyModalityToContext', but only act on context (for Relevance) if
 --   @--irrelevant-projections@.
 --   See issue #2170.
 applyModalityToContextFunBody :: (MonadTCM tcm, LensModality r) => r -> tcm a -> tcm a
 applyModalityToContextFunBody thing cont = do
-  let m = getModality thing
-  if m == mempty then cont else
-    applyWhenM (optIrrelevantProjections <$> pragmaOptions)
-      (applyRelevanceToContextOnly (getRelevance m)) $    -- enable local irr. defs only when option
-      applyModalityToJudgementOnly m cont  -- enable global irr. defs alway
+    ifM (optIrrelevantProjections <$> pragmaOptions)
+      {-then-} (applyModalityToContext m cont)                -- enable global irr. defs always
+      {-else-} (applyRelevanceToContextFunBody (getRelevance m)
+               $ applyCohesionToContext (getCohesion m)
+               $ applyQuantityToContext (getQuantity m) cont) -- enable local irr. defs only when option
+  where
+    m = getModality thing
 
 -- | Wake up irrelevant variables and make them relevant. This is used
 --   when type checking terms in a hole, in which case you want to be able to
@@ -253,7 +270,7 @@ applyModalityToContextFunBody thing cont = do
 wakeIrrelevantVars :: (MonadTCEnv tcm) => tcm a -> tcm a
 wakeIrrelevantVars
   = applyRelevanceToContextOnly Irrelevant
-  . applyQuantityToContextOnly  Quantity0
+  . applyQuantityToContextOnly  zeroQuantity
 
 -- | Check whether something can be used in a position of the given relevance.
 --
@@ -306,7 +323,7 @@ instance UsableRelevance Sort where
     Prop l -> usableRel rel l
     Inf    -> return True
     SizeUniv -> return True
-    PiSort s1 s2 -> usableRel rel (s1,s2)
+    PiSort a s -> usableRel rel (a,s)
     UnivSort s -> usableRel rel s
     MetaS x es -> usableRel rel es
     DefS d es  -> usableRel rel $ Def d es
@@ -413,7 +430,7 @@ instance UsableModality Sort where
   --   Prop l -> usableMod mod l
   --   Inf    -> return True
   --   SizeUniv -> return True
-  --   PiSort s1 s2 -> usableMod mod (s1,s2)
+  --   PiSort a s -> usableMod mod (a,s)
   --   UnivSort s -> usableMod mod s
   --   MetaS x es -> usableMod mod es
   --   DummyS{} -> return True

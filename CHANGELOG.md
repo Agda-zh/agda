@@ -6,6 +6,30 @@ Installation and infrastructure
 
 * Removed support for GHC 7.10.3.
 
+* Interface files are now written in directory _build/VERSION/agda/ at
+  the project root (the closest enclosing directory where an .agda-lib
+  file is present). If there is no project root then the interface file
+  is written alongside the module it corresponds to.
+
+API
+----
+* Removed module `Agda.Utils.HashMap`. It only re-exported `Data.HashMap.Strict`
+  from the package `unordered-containers`. Use `Data.HashMap.Strict` instead.
+
+* Removed module `Agda.Utils.Char`. It used to provide functions converting a
+  `Char` in base 8, 10, and 16 to the corresponding `Int`. Use `digitToInt` in
+  `Data.Char` instead. The rest of module was about Unicode test which was not
+  used.
+
+* `Agda.Utils.List` no longer provides `headMaybe`.
+  Use `listToMaybe` in `Data.Maybe` instead.
+
+* `Agda.Utils.Either` no longer provides `mapEither`. Use `bimap` in
+  `Data.Bifunctor` instead.
+
+* `Agda.Utils.Map` no longer provides `unionWithM`, `insertWithKeyM`,
+  `allWithKey`, `unzip`, and `unzip3`.
+
 Pragmas and options
 -------------------
 
@@ -15,6 +39,22 @@ Pragmas and options
 * New option `--confluence-check` (off by default) enables confluence
   checking of user-defined rewrite rules (this only has an effect when
   `--rewriting` is also enabled).
+
+* New option `--no-projection-like` to turn off the analysis whether a
+  type signature likens that of a projection.
+  Projection-likeness is an optimization that reduces the size of
+  terms by dropping parameter-like reconstructible function arguments.
+  Thus, it is advisable to leave this optimization on, the flag is
+  meant for debugging Agda.
+
+* Option `--no-forcing` is now a pragma option, i.e., the forcing analysis
+  can be switched off on a per-file basis via
+  ```agda
+  {-# OPTIONS --no-forcing #-}
+  ```
+  at the beginning of the file.
+
+* New pragma option `--no-flat-split` disables pattern matching on `@♭` arguments.
 
 GHC Backend
 -----------
@@ -91,7 +131,17 @@ Language
   one wakes up all constraints mentioning the given meta-variables,
   and then tries to solve all awake constraints.
 
+### Modalities
+
+* New Flat Modality
+
+  New modality `@♭/@flat` (previously only available in the branch "flat").
+  An idempotent comonadic modality modeled after spatial/crisp type thepry.
+  See "Flat Modality" in the documentation for more.
+
 ### Syntax
+
+* Implicit non-dependent function spaces `{A} → B` and `{{A}} → B` are now supported.
 
 * Idiom brackets
 
@@ -114,11 +164,97 @@ Language
   ```
   Idiom brackets with no application `(|)` or `⦇⦈` are equivalent to `empty`.
 
+
+* Irrefutable With
+
+  Users can now match on irrefutable patterns on the LHS using a
+  pattern-matching `with`. An expression of the form:
+
+  ```agda
+  f xs with p1 <- e1 | ... | pn <- en = rhs
+  ```
+
+  is translated to nested `with` clauses, essentially equivalent to:
+
+  ```agda
+  f xs with e1
+  ... | p1 with
+     (...) with en
+  ... | pn = rhs
+  ```
+
+* Record patterns in telescopes
+
+  Users can now use record patterns in telescope and lambda abstractions.
+  The type of the second projection from a dependent pair is the prototypical
+  example It can be defined as follows:
+
+  ```agda
+  snd : ((a , _) : Σ A B) → B a
+  ```
+
+  And this second projection can be implemented with a lamba-abstraction using
+  one of these irrefutable patterns:
+
+  ```agda
+  snd = λ (a , b) → b
+  ```
+
+  Using an as-pattern, users can get a name for the value as well as for its
+  subparts. We can for instance prove that any pair is equal to the pairing
+  of its first and second projections:
+
+  ```agda
+  eta : (p@(a , b) : Σ A B) → p ≡ (a , b)
+  eta p = refl
+  ```
+
+* Absurd match in a do block
+  The last expression in a do block can now also be an absurd match `() <- f`.
+
+* `{{-` is now lexed as `{ {-` rather than `{{ -`,
+  see issue [#3962](https://github.com/agda/agda/issues/3962).
+
+### Termination checking
+
+* The "with inlining" feature of the termination checker has been
+  removed. As a consequence, some functions defined using `with` are
+  no longer accepted as terminating. See issue
+  [#59](https://github.com/agda/agda/issues/59) for why this feature
+  was originally introduced and
+  [#3604](https://github.com/agda/agda/issues/3604) for why it had to
+  be removed.
+
 ### Rewrite rules
 
 * Rewrite rules (option `--rewriting`) with data or record types as
   the head symbol are no longer allowed (see issue
   [#3846](https://github.com/agda/agda/issues/3846)).
+
+### Tactics
+
+* Implicit arguments solved by user-defined tactics
+
+  You can declare tactics to be used to solve a particular implicit argument
+  using the following syntax:
+
+  ```agda
+  example : {@(tactic f) x : A} → B
+  ```
+
+  where `f : Term → TC ⊤`. At calls to `example`, `f` is called on the
+  metavariable inserted for `x`. `f` can be an arbitrary term and may depend on
+  previous arguments to the function. For instance,
+
+  ```agda
+  example₂ : (depth : Nat) {@(tactic search depth) x : A} → B
+  ```
+
+Emacs mode
+----------
+
+* Agda input method: new key bindings `\ G h` and `\ G H` for `η` and `H` (capital η).
+
 
 Release notes for Agda version 2.6.0.1
 ======================================

@@ -8,8 +8,7 @@ module Agda.Interaction.BasicOps where
 
 import Prelude hiding (null)
 
-import Control.Arrow ((***), first, second)
-import Control.Applicative hiding (empty)
+import Control.Arrow (first)
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Identity
@@ -17,19 +16,20 @@ import Control.Monad.Identity
 import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import qualified Data.List as List
 import Data.Maybe
-import Data.Traversable hiding (mapM, forM, for)
 import Data.Monoid
 
 import Agda.Interaction.Options
+import {-# SOURCE #-} Agda.Interaction.Imports (MaybeWarnings'(..), getMaybeWarnings)
+import Agda.Interaction.Response (Goals, ResponseContextEntry(..))
+
 import qualified Agda.Syntax.Concrete as C -- ToDo: Remove with instance of ToConcrete
 import Agda.Syntax.Position
 import Agda.Syntax.Abstract as A hiding (Open, Apply, Assign)
 import Agda.Syntax.Abstract.Views as A
 import Agda.Syntax.Abstract.Pretty
 import Agda.Syntax.Common
-import Agda.Syntax.Info (ExprInfo(..),MetaInfo(..),emptyMetaInfo,exprNoRange,defaultAppInfo_,defaultAppInfo)
+import Agda.Syntax.Info (MetaInfo(..),emptyMetaInfo,exprNoRange,defaultAppInfo_,defaultAppInfo)
 import qualified Agda.Syntax.Info as Info
 import Agda.Syntax.Internal as I
 import Agda.Syntax.Literal
@@ -63,7 +63,9 @@ import Agda.TypeChecking.Free
 import Agda.TypeChecking.CheckInternal
 import Agda.TypeChecking.SizedTypes.Solve
 import qualified Agda.TypeChecking.Pretty as TP
-import Agda.TypeChecking.Warnings ( runPM, warning )
+import Agda.TypeChecking.Warnings
+  ( runPM, warning, WhichWarnings(..), classifyWarnings, isMetaTCWarning
+  , WarningsAndNonFatalErrors, emptyWarningsAndNonFatalErrors )
 
 import Agda.Termination.TermCheck (termMutual)
 
@@ -122,7 +124,7 @@ giveExpr force mii mi e = do
         v <- checkExpr e t'
         case mvInstantiation mv of
 
-          InstV xs v' -> unlessM ((Irrelevant ==) <$> asksTC envRelevance) $ do
+          InstV xs v' -> unlessM ((Irrelevant ==) <$> asksTC getRelevance) $ do
             reportSDoc "interaction.give" 20 $ TP.sep
               [ "meta was already set to value v' = " TP.<+> prettyTCM v'
                 TP.<+> " with free variables " TP.<+> return (fsep $ map pretty xs)
@@ -251,16 +253,16 @@ refine force ii mr e = do
                 where isX (A.Var y) | x == y = Sum 1
                       isX _                  = mempty
 
-              lamView (A.Lam _ (DomainFree x) e) = Just (namedArg x, e)
-              lamView (A.Lam i (DomainFull (TBind r (x : xs) a)) e)
+              lamView (A.Lam _ (DomainFree _ x) e) = Just (namedArg x, e)
+              lamView (A.Lam i (DomainFull (TBind r t (x : xs) a)) e)
                 | null xs   = Just (namedArg x, e)
-                | otherwise = Just (namedArg x, A.Lam i (DomainFull $ TBind r xs a) e)
+                | otherwise = Just (namedArg x, A.Lam i (DomainFull $ TBind r t xs a) e)
               lamView _ = Nothing
 
               -- reduce beta-redexes where the argument is used at most once
               smartApp i e arg =
-                case lamView $ unScope e of
-                  Just (A.BindName x, e) | count x e < 2 -> mapExpr subX e
+                case fmap (first A.binderName) (lamView $ unScope e) of
+                  Just (A.BindName{unBind = x}, e) | count x e < 2 -> mapExpr subX e
                     where subX (A.Var y) | x == y = namedArg arg
                           subX e = e
                   _ -> App i e arg
@@ -360,9 +362,10 @@ data OutputConstraint a b
 
 -- | A subset of 'OutputConstraint'.
 
-data OutputConstraint' a b = OfType' { ofName :: b
-                                     , ofExpr :: a
-                                     }
+data OutputConstraint' a b = OfType'
+  { ofName :: b
+  , ofExpr :: a
+  }
 
 outputFormId :: OutputForm a b -> b
 outputFormId (OutputForm _ _ o) = out o
@@ -401,7 +404,8 @@ reifyElimToExpr e = case e of
     appl s v = A.App defaultAppInfo_ (A.Lit (LitString noRange s)) $ fmap unnamed v
 
 instance Reify Constraint (OutputConstraint Expr Expr) where
-    reify (ValueCmp cmp t u v)   = CmpInType cmp <$> reify t <*> reify u <*> reify v
+    reify (ValueCmp cmp (AsTermsOf t) u v) = CmpInType cmp <$> reify t <*> reify u <*> reify v
+    reify (ValueCmp cmp AsTypes u v) = CmpTypes cmp <$> reify u <*> reify v
     reify (ValueCmpOnFace cmp p t u v) = CmpInType cmp <$> (reify =<< ty) <*> reify (lam_o u) <*> reify (lam_o v)
       where
         lam_o = I.Lam (setRelevance Irrelevant defaultArgInfo) . NoAbs "_"
@@ -436,8 +440,8 @@ instance Reify Constraint (OutputConstraint Expr Expr) where
             CheckLambda cmp (Arg ai (xs, mt)) body target -> do
               domType <- maybe (return underscore) reify mt
               target  <- reify target
-              let mkN (WithHiding h x) = setHiding h $ defaultNamedArg $ A.BindName x
-                  bs = TBind noRange (map mkN xs) domType
+              let mkN (WithHiding h x) = setHiding h $ defaultNamedArg $ A.mkBinder_ x
+                  bs = mkTBind noRange (map mkN xs) domType
                   e  = A.Lam Info.exprNoRange (DomainFull bs) body
               return $ TypedAssign m' e target
             CheckArgs _ _ args t0 t1 _ -> do
@@ -463,7 +467,7 @@ instance Reify Constraint (OutputConstraint Expr Expr) where
       return $ PostponedCheckFunDef q a
     reify (HasBiggerSort a) = OfType <$> reify a <*> reify (UnivSort a)
     reify (HasPTSRule a b) = do
-      (a,(x,b)) <- reify (a,b)
+      (a,(x,b)) <- reify (unDom a,b)
       return $ PTSInstance a b
 
 instance (Pretty a, Pretty b) => Pretty (OutputForm a b) where
@@ -576,6 +580,44 @@ getConstraints' g f = liftTCM $ do
       withMetaInfo mv $ do
         let m = QuestionMark emptyMetaInfo{ metaNumber = Just $ fromIntegral ii } ii
         abstractToConcrete_ $ OutputForm noRange [] $ Assign m e
+
+-- | Goals and Warnings
+
+getGoals :: TCM Goals
+getGoals = do
+  -- visible metas (as-is)
+  visibleMetas <- typesOfVisibleMetas AsIs
+  -- hidden metas (unsolved implicit arguments simplified)
+  unsolvedNotOK <- not . optAllowUnsolved <$> pragmaOptions
+  hiddenMetas <- (guard unsolvedNotOK >>) <$> typesOfHiddenMetas Simplified
+  return (visibleMetas, hiddenMetas)
+
+getWarningsAndNonFatalErrors :: TCM WarningsAndNonFatalErrors
+getWarningsAndNonFatalErrors = do
+  mws <- getMaybeWarnings AllWarnings
+  let notMetaWarnings = filter (not . isMetaTCWarning) <$> mws
+  return $ case notMetaWarnings of
+    SomeWarnings ws@(_:_) -> classifyWarnings ws
+    _ -> emptyWarningsAndNonFatalErrors
+
+-- | Collecting the context of the given meta-variable.
+getResponseContext
+  :: Rewrite      -- ^ Normalise?
+  -> InteractionId
+  -> TCM [ResponseContextEntry]
+getResponseContext norm ii = withInteractionId ii $ do
+  ctx <- filter (not . shouldHide) <$> contextOfMeta ii norm
+  forM ctx $ \ entry -> do
+    -- name name part
+    let n = nameConcrete $ ofName entry
+    x  <- abstractToConcrete_ $ ofName entry
+    -- the type part
+    let e = ofExpr entry
+    let s = C.isInScope x
+    return $ ResponseContextEntry n x e s
+
+shouldHide :: OutputConstraint' a A.Name -> Bool
+shouldHide (OfType' n _) = isNoName n || nameIsRecordName n
 
 -- | @getSolvedInteractionPoints True@ returns all solutions,
 --   even if just solved by another, non-interaction meta.
@@ -777,33 +819,36 @@ metaHelperType norm ii rng s = case words s of
     betterName = do
       arg : args <- get
       put args
-      return $ case arg of
-        Arg _ (Named _ (A.Var x)) -> show $ A.nameConcrete x
-        Arg _ (Named (Just x) _)  -> argNameToString $ rangedThing x
-        _                         -> "w"
+      return $ if
+        | Arg _ (Named _ (A.Var x)) <- arg -> prettyShow $ A.nameConcrete x
+        | Just x <- bareNameOf arg         -> argNameToString x
+        | otherwise                        -> "w"
 
 
--- Gives a list of names and corresponding types.
+-- | Gives a list of names and corresponding types.
+--   This list includes not only the local variables in scope, but also the let-bindings.
 
-contextOfMeta :: InteractionId -> Rewrite -> TCM [OutputConstraint' Expr Name]
+contextOfMeta :: InteractionId -> Rewrite -> TCM [OutputConstraint' (Arg Expr) Name]
 contextOfMeta ii norm = do
   info <- getMetaInfo <$> (lookupMeta =<< lookupInteractionId ii)
   withMetaInfo info $ do
+    -- List of local variables.
     cxt <- getContext
     let n         = length cxt
         localVars = zipWith raise [1..] cxt
-        mkLet (x, lb) = do
-          (tm, !dom) <- getOpen lb
-          return $ (,) x <$> dom
+    -- List of let-bindings.
     letVars <- mapM mkLet . Map.toDescList =<< asksTC envLetBindings
-    mapMaybe visible . reverse <$> mapM out (letVars ++ localVars)
-  where visible (OfType x y) | not (isNoName x) = Just (OfType' x y)
-                             | otherwise        = Nothing
-        visible _            = __IMPOSSIBLE__
-        out (Dom{unDom = (x, t)}) = do
-          t' <- reifyUnblocked =<< normalForm norm t
-          return $ OfType x t'
-
+    -- Reify the types and filter out bindings without a name.
+    reverse <$> do
+      forMaybeM (letVars ++ localVars) $ \ Dom{ domInfo = ai, unDom = (x, t) } -> do
+        if isNoName x then return Nothing else Just <$> do
+          OfType' x . Arg ai <$> do
+            reifyUnblocked =<< normalForm norm t
+  where
+    mkLet :: (Name, Open (Term, Dom Type)) -> TCM (Dom (Name, Type))
+    mkLet (x, lb) = do
+      (_tm, !dom) <- getOpen lb
+      return $ (x,) <$> dom
 
 -- | Returns the type of the expression in the current environment
 --   We wake up irrelevant variables just in case the user want to
@@ -955,7 +1000,8 @@ atTopLevel m = inConcreteMode $ do
       -- Unfortunately, referring to let-bound variables
       -- from the top level module telescope will for now result in a not-in-scope error.
       let names :: [A.Name]
-          names = map localVar $ filter ((LetBound /=) . localBinder) $ map snd $ reverse $ scope ^. scopeLocals
+          names = map localVar $ filter ((LetBound /=) . localBindingSource)
+                               $ map snd $ reverse $ scope ^. scopeLocals
       -- Andreas, 2016-12-31, issue #2371
       -- The following is an unnecessary complication, as shadowed locals
       -- are not in scope anyway (they are ambiguous).

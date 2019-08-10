@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP       #-}
+{-# LANGUAGE DataKinds #-}
 
 module Agda.Interaction.Options
     ( CommandLineOptions(..)
@@ -32,15 +33,13 @@ module Agda.Interaction.Options
     , getOptSimple
     ) where
 
-import Control.Monad            ( (>=>), when )
+import Control.Monad            ( when )
 import Control.Monad.Trans
 
 import Data.IORef
-import Data.Either
 import Data.Function
 import Data.Maybe
-import Data.List                ( isSuffixOf , intercalate )
-import Data.Set                 ( Set )
+import Data.List                ( intercalate )
 import qualified Data.Set as Set
 
 import System.Console.GetOpt    ( getOpt', usageInfo, ArgOrder(ReturnInOrder)
@@ -68,7 +67,6 @@ import Agda.Utils.Functor       ( (<&>) )
 import Agda.Utils.Lens          ( Lens', over )
 import Agda.Utils.List          ( groupOn, wordsBy )
 import Agda.Utils.Monad         ( ifM, readM )
-import Agda.Utils.String        ( indent )
 import Agda.Utils.Trie          ( Trie )
 import qualified Agda.Utils.Trie as Trie
 import Agda.Utils.WithDefault
@@ -76,8 +74,6 @@ import Agda.Utils.WithDefault
 import Agda.Version
 -- Paths_Agda.hs is in $(BUILD_DIR)/build/autogen/.
 import Paths_Agda ( getDataFileName )
-
-import qualified System.IO.Unsafe as UNSAFE (unsafePerformIO)
 
 -- OptDescr is a Functor --------------------------------------------------
 
@@ -120,11 +116,12 @@ data CommandLineOptions = Options
   , optCSSFile          :: Maybe FilePath
   , optIgnoreInterfaces :: Bool
   , optIgnoreAllInterfaces :: Bool
-  , optForcing          :: Bool
   , optPragmaOptions    :: PragmaOptions
   , optOnlyScopeChecking :: Bool
     -- ^ Should the top-level module only be scope-checked, and not
     --   type-checked?
+  , optWithCompiler     :: Maybe FilePath
+    -- ^ Use the compiler at PATH instead of ghc / js / etc.
   }
   deriving Show
 
@@ -155,6 +152,8 @@ data PragmaOptions = PragmaOptions
   , optPatternMatching           :: Bool  -- ^ Is pattern matching allowed in the current file?
   , optExactSplit                :: Bool
   , optEta                       :: Bool
+  , optForcing                   :: Bool  -- ^ Perform the forcing analysis on data constructors?
+  , optProjectionLike            :: Bool  -- ^ Perform the projection-likeness analysis on functions?
   , optRewriting                 :: Bool  -- ^ Can rewrite rules be added and used?
   , optCubical                   :: Bool
   , optPostfixProjections        :: Bool
@@ -180,6 +179,8 @@ data PragmaOptions = PragmaOptions
     -- ^ Use the Agda abstract machine (fastReduce)?
   , optConfluenceCheck           :: Bool
     -- ^ Check confluence of rewrite rules?
+  , optFlatSplit                 :: Bool
+     -- ^ Can we split on a (x :{flat} A) argument?
   }
   deriving (Show, Eq)
 
@@ -228,9 +229,9 @@ defaultOptions = Options
   , optCSSFile          = Nothing
   , optIgnoreInterfaces = False
   , optIgnoreAllInterfaces = False
-  , optForcing          = True
   , optPragmaOptions    = defaultPragmaOptions
   , optOnlyScopeChecking = False
+  , optWithCompiler      = Nothing
   }
 
 defaultPragmaOptions :: PragmaOptions
@@ -258,6 +259,8 @@ defaultPragmaOptions = PragmaOptions
   , optPatternMatching           = True
   , optExactSplit                = False
   , optEta                       = True
+  , optForcing                   = True
+  , optProjectionLike            = True
   , optRewriting                 = False
   , optCubical                   = False
   , optPostfixProjections        = False
@@ -275,6 +278,7 @@ defaultPragmaOptions = PragmaOptions
   , optPrintPatternSynonyms      = True
   , optFastReduce                = True
   , optConfluenceCheck           = False
+  , optFlatSplit                 = True
   }
 
 -- | The default termination depth.
@@ -466,6 +470,12 @@ safeFlag o = do
              , optSizedTypes  = setDefault False sizedTypes
              }
 
+flatSplitFlag :: Flag PragmaOptions
+flatSplitFlag o = return $ o { optFlatSplit = True }
+
+noFlatSplitFlag :: Flag PragmaOptions
+noFlatSplitFlag o = return $ o { optFlatSplit = False }
+
 doubleCheckFlag :: Flag PragmaOptions
 doubleCheckFlag o = return $ o { optDoubleCheck = True }
 
@@ -579,8 +589,9 @@ dontUniverseCheckFlag o = return $ o { optUniverseCheck = False }
 omegaInOmegaFlag :: Flag PragmaOptions
 omegaInOmegaFlag o = return $ o { optOmegaInOmega = True }
 
-etaFlag :: Flag PragmaOptions
-etaFlag o = return $ o { optEta = True }
+--UNUSED Liang-Ting Chen 2019-07-16
+--etaFlag :: Flag PragmaOptions
+--etaFlag o = return $ o { optEta = True }
 
 noEtaFlag :: Flag PragmaOptions
 noEtaFlag o = return $ o { optEta = False }
@@ -610,8 +621,12 @@ universePolymorphismFlag o = return $ o { optUniversePolymorphism = True }
 noUniversePolymorphismFlag :: Flag PragmaOptions
 noUniversePolymorphismFlag  o = return $ o { optUniversePolymorphism = False }
 
-noForcingFlag :: Flag CommandLineOptions
+noForcingFlag :: Flag PragmaOptions
 noForcingFlag o = return $ o { optForcing = False }
+
+--UNUSED Liang-Ting Chen 2019-07-16
+--noProjectionLikeFlag :: Flag PragmaOptions
+--noProjectionLikeFlag o = return $ o { optProjectionLike = False }
 
 withKFlag :: Flag PragmaOptions
 withKFlag o = return $ o { optWithoutK = Value False }
@@ -751,6 +766,12 @@ confluenceCheckFlag o = return $ o { optConfluenceCheck = True }
 noConfluenceCheckFlag :: Flag PragmaOptions
 noConfluenceCheckFlag o = return $ o { optConfluenceCheck = False }
 
+withCompilerFlag :: FilePath -> Flag CommandLineOptions
+withCompilerFlag fp o = case optWithCompiler o of
+ Nothing -> pure o { optWithCompiler = Just fp }
+ Just{}  -> throwError "only one compiler path allowed"
+
+
 integerArgument :: String -> String -> OptM Int
 integerArgument flag s =
     readM s `catchError` \_ ->
@@ -805,10 +826,10 @@ standardOptions =
                     "don't use any library files"
     , Option []     ["no-default-libraries"] (NoArg noDefaultLibsFlag)
                     "don't use default libraries"
-    , Option []     ["no-forcing"] (NoArg noForcingFlag)
-                    "disable the forcing optimisation"
     , Option []     ["only-scope-checking"] (NoArg onlyScopeCheckingFlag)
                     "only scope-check the top-level module, do not type-check it"
+    , Option []     ["with-compiler"] (ReqArg withCompilerFlag "PATH")
+                    "use the compiler available at PATH"
     ] ++ map (fmap lensPragmaOptions) pragmaOptions
 
 -- | Defined locally here since module ''Agda.Interaction.Options.Lenses''
@@ -858,6 +879,10 @@ pragmaOptions =
                     "enable sized types (default, inconsistent with --guardedness)"
     , Option []     ["no-sized-types"] (NoArg noSizedTypes)
                     "disable sized types"
+    , Option []     ["flat-split"] (NoArg flatSplitFlag)
+                    "allow split on (x :{flat} A) arguments (default)"
+    , Option []     ["no-flat-split"] (NoArg noFlatSplitFlag)
+                    "disable split on (x :{flat} A) arguments"
     , Option []     ["guardedness"] (NoArg guardedness)
                     "enable constructor-based guarded corecursion (default, inconsistent with --sized-types)"
     , Option []     ["no-guardedness"] (NoArg noGuardedness)
@@ -890,6 +915,10 @@ pragmaOptions =
                     "do not require all clauses in a definition to hold as definitional equalities (default)"
     , Option []     ["no-eta-equality"] (NoArg noEtaFlag)
                     "default records to no-eta-equality"
+    , Option []     ["no-forcing"] (NoArg noForcingFlag)
+                    "disable the forcing analysis for data constructors (optimisation)"
+    , Option []     ["no-projection-like"] (NoArg noForcingFlag)
+                    "disable the analysis whether function signatures liken those of projections (optimisation)"
     , Option []     ["rewriting"] (NoArg rewritingFlag)
                     "enable declaration and use of REWRITE rules"
     , Option []     ["confluence-check"] (NoArg confluenceCheckFlag)

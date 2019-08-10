@@ -9,14 +9,13 @@ module Agda.Syntax.Abstract.Name
 
 import Control.DeepSeq
 
-import Data.Foldable (Foldable)
-import Data.Traversable (Traversable)
 import Data.Data (Data)
-import Data.List
+import Data.Foldable (Foldable)
 import Data.Function
 import Data.Hashable (Hashable(..))
-import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.List
+import Data.Maybe
+import Data.Traversable (Traversable)
 import Data.Void
 
 import Agda.Syntax.Position
@@ -26,8 +25,6 @@ import Agda.Syntax.Concrete.Name (IsNoName(..), NumHoles(..), NameInScope(..), L
 import qualified Agda.Syntax.Concrete.Name as C
 
 import Agda.Utils.List
-import Agda.Utils.Maybe
-import Agda.Utils.Monad
 import Agda.Utils.NonemptyList
 import Agda.Utils.Pretty
 import Agda.Utils.Size
@@ -37,13 +34,15 @@ import Agda.Utils.Impossible
 -- | A name is a unique identifier and a suggestion for a concrete name. The
 --   concrete name contains the source location (if any) of the name. The
 --   source location of the binding site is also recorded.
-data Name = Name { nameId          :: !NameId
-                 , nameConcrete    :: C.Name
-                 , nameBindingSite :: Range
-                 , nameFixity      :: Fixity'
-                 , nameIsRecordName :: Bool
-                 }
-    deriving Data
+data Name = Name
+  { nameId           :: !NameId
+  , nameConcrete     :: C.Name
+  , nameBindingSite  :: Range
+  , nameFixity       :: Fixity'
+  , nameIsRecordName :: Bool
+      -- ^ Is this the name of the invisible record variable `self`?
+      --   Should not be printed or displayed in the context, see issue #3584.
+  } deriving Data
 
 -- | Useful for debugging scoping problems
 uglyShowName :: Name -> String
@@ -333,6 +332,12 @@ instance Show ModuleName where
 --   abstract 'QName' into a string use @prettyShow@.
 instance Show QName where
   show = prettyShow
+
+nameToArgName :: Name -> ArgName
+nameToArgName = stringToArgName . prettyShow
+
+namedArgName :: NamedArg Name -> ArgName
+namedArgName x = fromMaybe (nameToArgName $ namedArg x) $ bareNameOf x
 
 ------------------------------------------------------------------------
 -- * Pretty instances

@@ -2,12 +2,9 @@
 
 module Agda.TypeChecking.Conversion.Pure where
 
-import Control.Monad
 import Control.Monad.Fail (MonadFail)
-import Control.Monad.Trans.Maybe
 import Control.Monad.State
 
-import Data.Monoid hiding ((<>))
 import Data.String
 
 import Agda.Syntax.Common
@@ -40,6 +37,12 @@ pureEqualTerm
   => Type -> Term -> Term -> m Bool
 pureEqualTerm a u v = locallyTC eCompareBlocked (const True) $
   isRight <$> runPureConversion (equalTerm a u v)
+
+pureCompareAs
+  :: (MonadReduce m, MonadAddContext m, HasBuiltins m, HasConstInfo m)
+  => Comparison -> CompareAs -> Term -> Term -> m Bool
+pureCompareAs cmp a u v = locallyTC eCompareBlocked (const True) $
+  isRight <$> runPureConversion (compareAs cmp a u v)
 
 runPureConversion
   :: (ReadTCState m, MonadDebug m, HasOptions m, MonadTCEnv m, Show a)
