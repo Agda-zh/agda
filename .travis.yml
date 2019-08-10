@@ -37,6 +37,7 @@ matrix:
             - cabal-install-2.4
             - ghc-8.6.5
             - texlive-binaries
+            - latex-cjk-all
           sources:
             - hvr-ghc
 
@@ -206,7 +207,7 @@ install:
        tar xzf /tmp/texlive.tar.gz -C ~ &&
        export PATH=$HOME/texlive/bin/x86_64-linux:$PATH &&
        tlmgr update --self &&
-       tlmgr install anyfontsize bbm capt-of cmap dvipng fncychap keystroke latexmk needspace &&
+       tlmgr install anyfontsize bbm capt-of cjk cmap dvipng fncychap keystroke latexmk needspace &&
        echo "*** pdfLaTeX version ***" &&
        pdflatex --version &&
        echo "*** Latexmk version ***" &&
