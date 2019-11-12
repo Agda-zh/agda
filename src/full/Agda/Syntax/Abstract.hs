@@ -106,13 +106,11 @@ data Expr
   | Rec  ExprInfo RecordAssigns        -- ^ Record construction.
   | RecUpdate ExprInfo Expr Assigns    -- ^ Record update.
   | ScopedExpr ScopeInfo Expr          -- ^ Scope annotation.
-  | QuoteGoal ExprInfo Name Expr       -- ^ Binds @Name@ to current type in @Expr@.
-  | QuoteContext ExprInfo              -- ^ Returns the current context.
   | Quote ExprInfo                     -- ^ Quote an identifier 'QName'.
   | QuoteTerm ExprInfo                 -- ^ Quote a term.
   | Unquote ExprInfo                   -- ^ The splicing construct: unquote ...
-  | Tactic ExprInfo Expr [NamedArg Expr] [NamedArg Expr]
-                                       -- ^ @tactic e x1 .. xn | y1 | .. | yn@
+  | Tactic ExprInfo Expr [NamedArg Expr]
+                                       -- ^ @tactic e x1 .. xn@
   | DontCare Expr                      -- ^ For printing @DontCare@ from @Syntax.Internal@.
   deriving (Data, Show)
 
@@ -190,22 +188,6 @@ data Declaration
   | UnquoteDef  [DefInfo] [QName] Expr
   | ScopedDecl ScopeInfo [Declaration]  -- ^ scope annotation
   deriving (Data, Show)
-
-class GetDefInfo a where
-  getDefInfo :: a -> Maybe DefInfo
-
-instance GetDefInfo Declaration where
-  getDefInfo (Axiom _ i _ _ _ _)    = Just i
-  getDefInfo (Generalize _ i _ _ _) = Just i
-  getDefInfo (Field i _ _)          = Just i
-  getDefInfo (Primitive i _ _)      = Just i
-  getDefInfo (ScopedDecl _ (d:_))   = getDefInfo d
-  getDefInfo (FunDef i _ _ _)       = Just i
-  getDefInfo (DataSig i _ _ _)      = Just i
-  getDefInfo (DataDef i _ _ _ _)    = Just i
-  getDefInfo (RecSig i _ _ _)       = Just i
-  getDefInfo (RecDef i _ _ _ _ _ _ _ _) = Just i
-  getDefInfo _ = Nothing
 
 type ImportDirective = ImportDirective' QName ModuleName
 type Renaming        = Renaming'        QName ModuleName
@@ -377,7 +359,7 @@ noWhereDecls = WhereDecls Nothing []
 
 type Clause = Clause' LHS
 type SpineClause = Clause' SpineLHS
-type RewriteEqn  = RewriteEqn' Pattern (QName, Expr)
+type RewriteEqn  = RewriteEqn' QName Pattern Expr
 
 data RHS
   = RHS
@@ -388,7 +370,7 @@ data RHS
       --   'Nothing' for internally generated rhss.
     }
   | AbsurdRHS
-  | WithRHS QName [Expr] [Clause]
+  | WithRHS QName [WithHiding Expr] [Clause]
       -- ^ The 'QName' is the name of the with function.
   | RewriteRHS
     { rewriteExprs      :: [RewriteEqn]
@@ -513,7 +495,7 @@ instance IsProjP Expr where
     Things we parse but are not part of the Agda file syntax
  --------------------------------------------------------------------------}
 
-type HoleContent = C.HoleContent' Pattern Expr
+type HoleContent = C.HoleContent' () Pattern Expr
 
 {--------------------------------------------------------------------------
     Instances
@@ -549,12 +531,10 @@ instance Eq Expr where
   ETel a1                 == ETel a2                 = a1 == a2
   Rec a1 b1               == Rec a2 b2               = (a1, b1) == (a2, b2)
   RecUpdate a1 b1 c1      == RecUpdate a2 b2 c2      = (a1, b1, c1) == (a2, b2, c2)
-  QuoteGoal a1 b1 c1      == QuoteGoal a2 b2 c2      = (a1, b1, c1) == (a2, b2, c2)
-  QuoteContext a1         == QuoteContext a2         = a1 == a2
   Quote a1                == Quote a2                = a1 == a2
   QuoteTerm a1            == QuoteTerm a2            = a1 == a2
   Unquote a1              == Unquote a2              = a1 == a2
-  Tactic a1 b1 c1 d1      == Tactic a2 b2 c2 d2      = (a1, b1, c1, d1) == (a2, b2, c2, d2)
+  Tactic a1 b1 c1         == Tactic a2 b2 c2         = (a1, b1, c1) == (a2, b2, c2)
   DontCare a1             == DontCare a2             = a1 == a2
 
   _                       == _                       = False
@@ -637,12 +617,10 @@ instance HasRange Expr where
     getRange (RecUpdate i _ _)     = getRange i
     getRange (ETel tel)            = getRange tel
     getRange (ScopedExpr _ e)      = getRange e
-    getRange (QuoteGoal _ _ e)     = getRange e
-    getRange (QuoteContext i)      = getRange i
     getRange (Quote i)             = getRange i
     getRange (QuoteTerm i)         = getRange i
     getRange (Unquote i)           = getRange i
-    getRange (Tactic i _ _ _)      = getRange i
+    getRange (Tactic i _ _)        = getRange i
     getRange (DontCare{})          = noRange
     getRange (PatternSyn x)        = getRange x
     getRange (Macro x)             = getRange x
@@ -698,10 +676,10 @@ instance HasRange a => HasRange (Clause' a) where
     getRange (Clause lhs _ rhs ds catchall) = getRange (lhs, rhs, ds)
 
 instance HasRange RHS where
-    getRange AbsurdRHS                = noRange
-    getRange (RHS e _)                = getRange e
-    getRange (WithRHS _ e cs)         = fuseRange e cs
-    getRange (RewriteRHS xes _ rhs wh) = getRange (map (snd <$>) xes, rhs, wh)
+    getRange AbsurdRHS                 = noRange
+    getRange (RHS e _)                 = getRange e
+    getRange (WithRHS _ e cs)          = fuseRange e cs
+    getRange (RewriteRHS xes _ rhs wh) = getRange (xes, rhs, wh)
 
 instance HasRange WhereDeclarations where
   getRange (WhereDecls _ ds) = getRange ds
@@ -770,12 +748,10 @@ instance KillRange Expr where
   killRange (RecUpdate i e fs)     = killRange3 RecUpdate i e fs
   killRange (ETel tel)             = killRange1 ETel tel
   killRange (ScopedExpr s e)       = killRange1 (ScopedExpr s) e
-  killRange (QuoteGoal i x e)      = killRange3 QuoteGoal i x e
-  killRange (QuoteContext i)       = killRange1 QuoteContext i
   killRange (Quote i)              = killRange1 Quote i
   killRange (QuoteTerm i)          = killRange1 QuoteTerm i
   killRange (Unquote i)            = killRange1 Unquote i
-  killRange (Tactic i e xs ys)     = killRange4 Tactic i e xs ys
+  killRange (Tactic i e xs)        = killRange3 Tactic i e xs
   killRange (DontCare e)           = killRange1 DontCare e
   killRange (PatternSyn x)         = killRange1 PatternSyn x
   killRange (Macro x)              = killRange1 Macro x
@@ -903,6 +879,9 @@ instance AllNames a => AllNames (Named name a) where
 instance (AllNames a, AllNames b) => AllNames (a,b) where
   allNames (a,b) = allNames a >< allNames b
 
+instance (AllNames a, AllNames b, AllNames c) => AllNames (a,b,c) where
+  allNames (a,b,c) = allNames a >< allNames b >< allNames c
+
 instance AllNames QName where
   allNames q = Seq.singleton q
 
@@ -930,17 +909,16 @@ instance AllNames Declaration where
 instance AllNames Clause where
   allNames cl = allNames (clauseRHS cl, clauseWhereDecls cl)
 
-instance AllNames e => AllNames (RewriteEqn' p e) where
+instance (AllNames qn, AllNames e) => AllNames (RewriteEqn' qn p e) where
     allNames = \case
-      Rewrite es -> Fold.foldMap allNames es
-      Invert pes -> Fold.foldMap (Fold.foldMap allNames) pes
+      Rewrite es    -> Fold.foldMap allNames es
+      Invert qn pes -> allNames qn >< foldMap (Fold.foldMap allNames) pes
 
 instance AllNames RHS where
   allNames (RHS e _)                 = allNames e
   allNames AbsurdRHS{}               = Seq.empty
   allNames (WithRHS q _ cls)         = q <| allNames cls
-  allNames (RewriteRHS qes _ rhs cls) =
-    allNames (map (fst <$>) qes) >< allNames rhs >< allNames cls
+  allNames (RewriteRHS qes _ rhs cls) = allNames (qes, rhs, cls)
 
 instance AllNames WhereDeclarations where
   allNames (WhereDecls _ ds) = allNames ds
@@ -969,12 +947,10 @@ instance AllNames Expr where
   allNames (Rec _ fields)          = allNames [ a ^. exprFieldA | Left a <- fields ]
   allNames (RecUpdate _ e fs)      = allNames e >< allNames (map (view exprFieldA) fs)
   allNames (ScopedExpr _ e)        = allNames e
-  allNames (QuoteGoal _ _ e)       = allNames e
-  allNames (QuoteContext _)        = Seq.empty
   allNames Quote{}                 = Seq.empty
   allNames QuoteTerm{}             = Seq.empty
   allNames Unquote{}               = Seq.empty
-  allNames (Tactic _ e xs ys)      = allNames e >< allNames xs >< allNames ys
+  allNames (Tactic _ e xs)         = allNames e >< allNames xs
   allNames DontCare{}              = Seq.empty
   allNames PatternSyn{}            = Seq.empty
   allNames Macro{}                 = Seq.empty
@@ -1160,12 +1136,10 @@ instance SubstExpr Expr where
     RecUpdate i e nes     -> RecUpdate i (substExpr s e) (substExpr s nes)
     -- XXX: Do we need to do more with ScopedExprs?
     ScopedExpr si e       -> ScopedExpr si (substExpr s e)
-    QuoteGoal i n e       -> QuoteGoal i n (substExpr s e)
-    QuoteContext i        -> e
     Quote i               -> e
     QuoteTerm i           -> e
     Unquote i             -> e
-    Tactic i e xs ys      -> Tactic i (substExpr s e) (substExpr s xs) (substExpr s ys)
+    Tactic i e xs         -> Tactic i (substExpr s e) (substExpr s xs)
     DontCare e            -> DontCare (substExpr s e)
     PatternSyn{}          -> e
     Macro{}               -> e

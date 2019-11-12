@@ -47,10 +47,11 @@ $nonalpha    = $idchar # $alpha
 $white_notab = $white # \t
 $white_nonl  = $white_notab # \n
 
-@number      = $digit+ | "0x" $hexdigit+
-@integer     = [\-]? @number
-@exponent    = [eE] [\-\+]? @number
-@float       = @integer \. @number @exponent? | @number @exponent
+@number       = $digit+ | "0x" $hexdigit+
+@prettynumber = $digit+ ([_] $digit+)* | "0x" $hexdigit+
+@integer      = [\-]? @prettynumber
+@exponent     = [eE] [\-\+]? @number
+@float        = @integer \. @number @exponent? | @number @exponent
 
 -- A name can't start with \x (to allow \x -> x).
 -- Bug in alex: [ _ op ]+ doesn't seem to work!
@@ -87,6 +88,7 @@ tokens :-
 <pragma_>   "NO_POSITIVITY_CHECK"      { keyword KwNO_POSITIVITY_CHECK }
 <pragma_>   "NO_TERMINATION_CHECK"     { keyword KwNO_TERMINATION_CHECK }
 <pragma_>   "NO_UNIVERSE_CHECK"        { keyword KwNO_UNIVERSE_CHECK }
+<pragma_>   "NON_COVERING"             { keyword KwNON_COVERING }
 <pragma_>   "NON_TERMINATING"          { keyword KwNON_TERMINATING }
 <pragma_>   "OPTIONS"                  { keyword KwOPTIONS }
 <pragma_>   "POLARITY"                 { keyword KwPOLARITY }
@@ -171,8 +173,6 @@ tokens :-
 <0,code> forall         { keyword KwForall }
 <0,code> Set @number    { withInterval' (read . drop 3) TokSetN }
 <0,code> Prop @number   { withInterval' (read . drop 4) TokPropN }
-<0,code> quoteGoal      { keyword KwQuoteGoal }
-<0,code> quoteContext   { keyword KwQuoteContext }
 <0,code> quote          { keyword KwQuote }
 <0,code> quoteTerm      { keyword KwQuoteTerm }
 <0,code> unquote        { keyword KwUnquote }
@@ -231,7 +231,7 @@ tokens :-
 -- Literals
 <0,code> \'             { litChar }
 <0,code,pragma_> \"     { litString }
-<0,code> @integer       { literal LitNat }
+<0,code> @integer       { literal' integer LitNat }
 <0,code> @float         { literal LitFloat }
 
 -- Identifiers

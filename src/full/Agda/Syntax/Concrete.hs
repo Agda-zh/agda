@@ -41,6 +41,7 @@ module Agda.Syntax.Concrete
   , AsName'(..), AsName
   , OpenShortHand(..), RewriteEqn, WithExpr
   , LHS(..), Pattern(..), LHSCore(..)
+  , observeHiding
   , LamClause(..)
   , RHS, RHS'(..), WhereClause, WhereClause'(..), ExprWhere(..)
   , DoStmt(..)
@@ -161,11 +162,9 @@ data Expr
   | As Range Name Expr                         -- ^ ex: @x\@p@, only in patterns
   | Dot Range Expr                             -- ^ ex: @.p@, only in patterns
   | ETel Telescope                             -- ^ only used for printing telescopes
-  | QuoteGoal Range Name Expr                  -- ^ ex: @quoteGoal x in e@
-  | QuoteContext Range                         -- ^ ex: @quoteContext@
   | Quote Range                                -- ^ ex: @quote@, should be applied to a name
   | QuoteTerm Range                            -- ^ ex: @quoteTerm@, should be applied to a term
-  | Tactic Range Expr [Expr]                   -- ^ @tactic solve | subgoal1 | .. | subgoalN@
+  | Tactic Range Expr                          -- ^ ex: @\@(tactic t)@, used to declare tactic arguments
   | Unquote Range                              -- ^ ex: @unquote@, should be applied to a term of type @Term@
   | DontCare Expr                              -- ^ to print irrelevant things
   | Equal Range Expr Expr                      -- ^ ex: @a = b@, used internally in the parser
@@ -286,13 +285,13 @@ makePi bs e = Pi bs e
    We use fixity information to see which name is actually defined.
 -}
 data LHS = LHS
-  { lhsOriginalPattern :: Pattern       -- ^ e.g. @f ps | wps@
-  , lhsRewriteEqn      :: [RewriteEqn]  -- ^ @(rewrite e | with p <- e)@ (many)
-  , lhsWithExpr        :: [WithExpr]    -- ^ @with e@ (many)
+  { lhsOriginalPattern :: Pattern               -- ^ e.g. @f ps | wps@
+  , lhsRewriteEqn      :: [RewriteEqn]          -- ^ @(rewrite e | with p <- e)@ (many)
+  , lhsWithExpr        :: [WithHiding WithExpr] -- ^ @with e1 | {e2} | ...@ (many)
   } -- ^ Original pattern (including with-patterns), rewrite equations and with-expressions.
   deriving (Data, Eq)
 
-type RewriteEqn = RewriteEqn' Pattern Expr
+type RewriteEqn = RewriteEqn' () Pattern Expr
 
 type WithExpr   = Expr
 
@@ -456,6 +455,9 @@ data Pragma
   | TerminationCheckPragma    Range (TerminationCheck Name)
     -- ^ Applies to the following function (and all that are mutually recursive with it)
     --   or to the functions in the following mutual block.
+  | NoCoverageCheckPragma     Range
+    -- ^ Applies to the following function (and all that are mutually recursive with it)
+    --   or to the functions in the following mutual block.
   | NoPositivityCheckPragma   Range
     -- ^ Applies to the following data/record type or mutual block.
   | PolarityPragma            Range Name [Occurrence]
@@ -502,12 +504,12 @@ spanAllowedBeforeModule = span isAllowedBeforeModule
  --------------------------------------------------------------------------}
 
 -- | Extended content of an interaction hole.
-data HoleContent' p e
-  = HoleContentExpr    e                 -- ^ @e@
-  | HoleContentRewrite [RewriteEqn' p e] -- ^ @(rewrite | invert) e0 | ... | en@
+data HoleContent' qn p e
+  = HoleContentExpr    e                    -- ^ @e@
+  | HoleContentRewrite [RewriteEqn' qn p e] -- ^ @(rewrite | invert) e0 | ... | en@
   deriving (Functor, Foldable, Traversable)
 
-type HoleContent = HoleContent' Pattern Expr
+type HoleContent = HoleContent' () Pattern Expr
 
 {--------------------------------------------------------------------------
     Views
@@ -540,6 +542,15 @@ removeSingletonRawAppP p = case p of
     RawAppP _ [p'] -> removeSingletonRawAppP p'
     ParenP _ p'    -> removeSingletonRawAppP p'
     _ -> p
+
+-- | Observe the hiding status of an expression
+
+observeHiding :: Expr -> WithHiding Expr
+observeHiding = \case
+  RawApp _ [e]                    -> observeHiding e
+  HiddenArg _   (Named Nothing e) -> WithHiding Hidden e
+  InstanceArg _ (Named Nothing e) -> WithHiding (Instance NoOverlap) e
+  e                               -> WithHiding NotHidden e
 
 -- | Turn an expression into a pattern. Fails if the expression is not a
 --   valid pattern.
@@ -683,12 +694,10 @@ instance HasRange Expr where
       Rec r _            -> r
       RecUpdate r _ _    -> r
       ETel tel           -> getRange tel
-      QuoteGoal r _ _    -> r
-      QuoteContext r     -> r
       Quote r            -> r
       QuoteTerm r        -> r
       Unquote r          -> r
-      Tactic r _ _       -> r
+      Tactic r _         -> r
       DontCare{}         -> noRange
       Equal r _ _        -> r
       Ellipsis r         -> r
@@ -789,6 +798,7 @@ instance HasRange Pragma where
   getRange (ImpossiblePragma r)              = r
   getRange (EtaPragma r _)                   = r
   getRange (TerminationCheckPragma r _)      = r
+  getRange (NoCoverageCheckPragma r)         = r
   getRange (WarningOnUsage r _ _)            = r
   getRange (WarningOnImport r _)             = r
   getRange (CatchallPragma r)                = r
@@ -923,12 +933,10 @@ instance KillRange Expr where
   killRange (As _ n e)           = killRange2 (As noRange) n e
   killRange (Dot _ e)            = killRange1 (Dot noRange) e
   killRange (ETel t)             = killRange1 ETel t
-  killRange (QuoteGoal _ n e)    = killRange2 (QuoteGoal noRange) n e
-  killRange (QuoteContext _)     = QuoteContext noRange
   killRange (Quote _)            = Quote noRange
   killRange (QuoteTerm _)        = QuoteTerm noRange
   killRange (Unquote _)          = Unquote noRange
-  killRange (Tactic _ t es)      = killRange2 (Tactic noRange) t es
+  killRange (Tactic _ t)         = killRange1 (Tactic noRange) t
   killRange (DontCare e)         = killRange1 DontCare e
   killRange (Equal _ x y)        = Equal noRange x y
   killRange (Ellipsis _)         = Ellipsis noRange
@@ -987,6 +995,7 @@ instance KillRange Pragma where
   killRange (ForeignPragma _ b s)             = ForeignPragma noRange b s
   killRange (ImpossiblePragma _)              = ImpossiblePragma noRange
   killRange (TerminationCheckPragma _ t)      = TerminationCheckPragma noRange (killRange t)
+  killRange (NoCoverageCheckPragma _)         = NoCoverageCheckPragma noRange
   killRange (WarningOnUsage _ nm str)         = WarningOnUsage noRange (killRange nm) str
   killRange (WarningOnImport _ str)           = WarningOnImport noRange str
   killRange (CatchallPragma _)                = CatchallPragma noRange
@@ -1044,11 +1053,9 @@ instance NFData Expr where
   rnf (As _ a b)         = rnf a `seq` rnf b
   rnf (Dot _ a)          = rnf a
   rnf (ETel a)           = rnf a
-  rnf (QuoteGoal _ a b)  = rnf a `seq` rnf b
-  rnf (QuoteContext _)   = ()
   rnf (Quote _)          = ()
   rnf (QuoteTerm _)      = ()
-  rnf (Tactic _ a b)     = rnf a `seq` rnf b
+  rnf (Tactic _ a)       = rnf a
   rnf (Unquote _)        = ()
   rnf (DontCare a)       = rnf a
   rnf (Equal _ a b)      = rnf a `seq` rnf b
@@ -1122,6 +1129,7 @@ instance NFData Pragma where
   rnf (ImpossiblePragma _)              = ()
   rnf (EtaPragma _ a)                   = rnf a
   rnf (TerminationCheckPragma _ a)      = rnf a
+  rnf (NoCoverageCheckPragma _)         = ()
   rnf (WarningOnUsage _ a b)            = rnf a `seq` rnf b
   rnf (WarningOnImport _ a)             = rnf a
   rnf (CatchallPragma _)                = ()

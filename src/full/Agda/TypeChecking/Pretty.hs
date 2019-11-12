@@ -203,7 +203,7 @@ instance PrettyTCM Clause where
     prettyTCM (QNamed x cl)
 
 instance PrettyTCM a => PrettyTCM (Judgement a) where
-  prettyTCM (HasType a t) = prettyTCM a <+> ":" <+> prettyTCM t
+  prettyTCM (HasType a cmp t) = prettyTCM a <+> ":" <+> prettyTCM t
   prettyTCM (IsSort  a t) = "Sort" <+> prettyTCM a <+> ":" <+> prettyTCM t
 
 instance PrettyTCM MetaId where
@@ -333,6 +333,11 @@ instance PrettyTCM Constraint where
         UnquoteTactic _ v _ _ -> do
           e <- reify v
           prettyTCM (A.App A.defaultAppInfo_ (A.Unquote A.exprNoRange) (defaultNamedArg e))
+        CheckMetaInst x -> do
+          m <- lookupMeta x
+          case mvJudgement m of
+            HasType{ jMetaType = t } -> prettyTCM x <+> ":" <+> prettyTCM t
+            IsSort{} -> prettyTCM x <+> "is a sort"
 
       where
         prettyCmp
@@ -342,7 +347,7 @@ instance PrettyTCM Constraint where
 
 instance PrettyTCM CompareAs where
   prettyTCM (AsTermsOf a) = ":" <+> prettyTCMCtx TopCtx a
-  prettyTCM AsTypes       = ""
+  prettyTCM AsTypes       = empty
 
 instance PrettyTCM TypeCheckingProblem where
   prettyTCM (CheckExpr cmp e a) =
@@ -444,6 +449,7 @@ instance PrettyTCM NLPat where
   prettyTCM (PPi a b)   = parens $
     text ("(" ++ absName b ++ " :") <+> (prettyTCM (unDom a) <> ") →") <+>
     (addContext (absName b) $ prettyTCM $ unAbs b)
+  prettyTCM (PSort s)        = prettyTCM s
   prettyTCM (PBoundVar i []) = prettyTCM (var i)
   prettyTCM (PBoundVar i es) = parens $ prettyTCM (var i) <+> fsep (map prettyTCM es)
   prettyTCM (PTerm t)   = "." <> parens (prettyTCM t)

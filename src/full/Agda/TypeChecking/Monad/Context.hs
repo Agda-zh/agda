@@ -5,13 +5,14 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans.Maybe
 import Control.Monad.Writer
+import Control.Monad.Fail (MonadFail)
 
 import qualified Data.List as List
 import qualified Data.Map as Map
 
 import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Common
-import Agda.Syntax.Concrete.Name (LensInScope(..))
+import Agda.Syntax.Concrete.Name (NameInScope(..), LensInScope(..), nameRoot, nameToRawName)
 import Agda.Syntax.Internal
 import Agda.Syntax.Position
 import Agda.Syntax.Scope.Base
@@ -189,20 +190,33 @@ instance MonadAddContext m => MonadAddContext (ListT m) where
   withFreshName r x ret = ListT $ withFreshName r x $ \n -> runListT (ret n)
 
 instance MonadAddContext TCM where
-  addCtx x a ret = do
-    when (not $ isNoName x) $ do
-      registerForShadowing x
-      ys <- getContextNames
-      forM_ ys $ \y ->
-        when (not (isNoName y) && sameRoot x y) $ tellShadowing x y
-    defaultAddCtx x a ret
+  addCtx x a ret
+    | isNoName x = defaultAddCtx x a ret
+    | otherwise  = do
+        when (isInScope x == InScope) $ tellUsedName x
+        (result , useds) <- listenUsedNames $ defaultAddCtx x a ret
+        tellShadowing x useds
+        return result
 
     where
-      -- add x to the map of possibly shadowed names
-      registerForShadowing x = modifyTCLens stShadowingNames $ Map.insert x []
+      listenUsedNames f = do
+        origUsedNames <- useTC stUsedNames
+        setTCLens stUsedNames Map.empty
+        result <- f
+        newUsedNames <- useTC stUsedNames
+        setTCLens stUsedNames $ Map.unionWith (++) origUsedNames newUsedNames
+        return (result , newUsedNames)
 
-      -- register the fact that x possibly shadows the name y
-      tellShadowing x y = modifyTCLens stShadowingNames $ Map.adjust (x:) y
+      tellUsedName x = do
+        let concreteX = nameConcrete x
+            rawX      = nameToRawName concreteX
+            rootX     = nameRoot concreteX
+        modifyTCLens (stUsedNames . key rootX) $ Just . (rawX:) . concat
+
+      tellShadowing x useds = case Map.lookup (nameRoot $ nameConcrete x) useds of
+        Just shadows -> modifyTCLens stShadowingNames $ Map.insertWith (++) x shadows
+        Nothing      -> return ()
+
 
   updateContext sub f = modifyContext f . checkpoint sub
 
@@ -391,7 +405,7 @@ lookupBV' n = do
   return $ raise (n + 1) <$> ctx !!! n
 
 {-# SPECIALIZE lookupBV :: Nat -> TCM (Dom (Name, Type)) #-}
-lookupBV :: MonadTCEnv m => Nat -> m (Dom (Name, Type))
+lookupBV :: (MonadFail m, MonadTCEnv m) => Nat -> m (Dom (Name, Type))
 lookupBV n = do
   let failure = do
         ctx <- getContext
@@ -400,26 +414,26 @@ lookupBV n = do
   maybeM failure return $ lookupBV' n
 
 {-# SPECIALIZE domOfBV :: Nat -> TCM (Dom Type) #-}
-domOfBV :: (Applicative m, MonadTCEnv m) => Nat -> m (Dom Type)
+domOfBV :: (Applicative m, MonadFail m, MonadTCEnv m) => Nat -> m (Dom Type)
 domOfBV n = fmap snd <$> lookupBV n
 
 {-# SPECIALIZE typeOfBV :: Nat -> TCM Type #-}
-typeOfBV :: (Applicative m, MonadTCEnv m) => Nat -> m Type
+typeOfBV :: (Applicative m, MonadFail m, MonadTCEnv m) => Nat -> m Type
 typeOfBV i = unDom <$> domOfBV i
 
 {-# SPECIALIZE nameOfBV' :: Nat -> TCM (Maybe Name) #-}
-nameOfBV' :: (Applicative m, MonadTCEnv m) => Nat -> m (Maybe Name)
+nameOfBV' :: (Applicative m, MonadFail m, MonadTCEnv m) => Nat -> m (Maybe Name)
 nameOfBV' n = fmap (fst . unDom) <$> lookupBV' n
 
 {-# SPECIALIZE nameOfBV :: Nat -> TCM Name #-}
-nameOfBV :: (Applicative m, MonadTCEnv m) => Nat -> m Name
+nameOfBV :: (Applicative m, MonadFail m, MonadTCEnv m) => Nat -> m Name
 nameOfBV n = fst . unDom <$> lookupBV n
 
 -- | Get the term corresponding to a named variable. If it is a lambda bound
 --   variable the deBruijn index is returned and if it is a let bound variable
 --   its definition is returned.
 {-# SPECIALIZE getVarInfo :: Name -> TCM (Term, Dom Type) #-}
-getVarInfo :: MonadTCEnv m => Name -> m (Term, Dom Type)
+getVarInfo :: (MonadFail m, MonadTCEnv m) => Name -> m (Term, Dom Type)
 getVarInfo x =
     do  ctx <- getContext
         def <- asksTC envLetBindings

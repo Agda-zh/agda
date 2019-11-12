@@ -24,6 +24,8 @@ import {-# SOURCE #-} Agda.Syntax.Fixity
 import Agda.Syntax.Concrete.Name (IsNoName(..), NumHoles(..), NameInScope(..), LensInScope(..))
 import qualified Agda.Syntax.Concrete.Name as C
 
+import Agda.Utils.Functor
+import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.NonemptyList
 import Agda.Utils.Pretty
@@ -227,13 +229,23 @@ qualify_ = qualify noModuleName
 -- | Is the name an operator?
 
 isOperator :: QName -> Bool
-isOperator q = C.isOperator (nameConcrete (qnameName q))
+isOperator = C.isOperator . nameConcrete . qnameName
 
-isSubModuleOf :: ModuleName -> ModuleName -> Bool
-isSubModuleOf x y = xs /= ys && isPrefixOf ys xs
-  where
-    xs = mnameToList x
-    ys = mnameToList y
+-- | Is the first module a weak parent of the second?
+isLeParentModuleOf :: ModuleName -> ModuleName -> Bool
+isLeParentModuleOf = isPrefixOf `on` mnameToList
+
+-- | Is the first module a proper parent of the second?
+isLtParentModuleOf :: ModuleName -> ModuleName -> Bool
+isLtParentModuleOf x y = isJust $ (stripPrefixBy (==) `on` mnameToList) x y
+
+-- | Is the first module a weak child of the second?
+isLeChildModuleOf :: ModuleName -> ModuleName -> Bool
+isLeChildModuleOf = flip isLeParentModuleOf
+
+-- | Is the first module a proper child of the second?
+isLtChildModuleOf :: ModuleName -> ModuleName -> Bool
+isLtChildModuleOf = flip isLtParentModuleOf
 
 isInModule :: QName -> ModuleName -> Bool
 isInModule q m = mnameToList m `isPrefixOf` qnameToList q
@@ -289,6 +301,33 @@ instance NumHoles QName where
 -- | We can have an instance for ambiguous names as all share a common concrete name.
 instance NumHoles AmbiguousQName where
   numHoles = numHoles . headAmbQ
+
+------------------------------------------------------------------------
+-- * name lenses
+------------------------------------------------------------------------
+
+lensQNameName :: Lens' Name QName
+lensQNameName f (QName m n) = QName m <$> f n
+
+------------------------------------------------------------------------
+-- * LensFixity' instances
+------------------------------------------------------------------------
+
+instance LensFixity' Name where
+  lensFixity' f n = f (nameFixity n) <&> \ fix' -> n { nameFixity = fix' }
+
+instance LensFixity' QName where
+  lensFixity' = lensQNameName . lensFixity'
+
+------------------------------------------------------------------------
+-- * LensFixity instances
+------------------------------------------------------------------------
+
+instance LensFixity Name where
+  lensFixity = lensFixity' . lensFixity
+
+instance LensFixity QName where
+  lensFixity = lensFixity' . lensFixity
 
 ------------------------------------------------------------------------
 -- * LensInScope instances

@@ -26,6 +26,8 @@ import Control.Monad
 import Data.Functor
 import Data.Maybe
 
+import Agda.Interaction.Options (optCumulativity)
+
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 
@@ -40,7 +42,7 @@ import Agda.TypeChecking.Monad.Context
 import Agda.TypeChecking.Monad.Debug
 import Agda.TypeChecking.Monad.MetaVars (metaType)
 import Agda.TypeChecking.Monad.Signature (HasConstInfo(..), applyDef)
-import Agda.TypeChecking.Pretty ()
+import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.ProjectionLike (elimView)
 import Agda.TypeChecking.Records (getDefType)
 import Agda.TypeChecking.Reduce
@@ -50,6 +52,7 @@ import Agda.TypeChecking.Telescope
 import Agda.Utils.Except
 import Agda.Utils.Impossible
 import Agda.Utils.Lens
+import Agda.Utils.Monad
 
 -- | Infer the sort of another sort. If we can compute the bigger sort
 --   straight away, return that. Otherwise, return @UnivSort s@ and add a
@@ -69,7 +72,9 @@ inferUnivSort s = do
 sortFitsIn :: MonadConversion m => Sort -> Sort -> m ()
 sortFitsIn a b = do
   b' <- inferUnivSort a
-  equalSort b' b -- CUMULATIVITY: leqSort b' b
+  ifM (optCumulativity <$> pragmaOptions)
+    (leqSort b' b)
+    (equalSort b' b)
 
 hasBiggerSort :: Sort -> TCM ()
 hasBiggerSort = void . inferUnivSort
@@ -106,13 +111,17 @@ inferFunSort a s = inferPiSort a $ NoAbs underscore s
 ptsRule :: Dom Type -> Abs Sort -> Sort -> TCM ()
 ptsRule a b c = do
   c' <- inferPiSort a b
-  equalSort c' c -- CUMULATIVITY: leqSort c' c
+  ifM (optCumulativity <$> pragmaOptions)
+    (leqSort c' c)
+    (equalSort c' c)
 
 -- | Non-dependent version of ptsRule
 ptsRule' :: Dom Type -> Sort -> Sort -> TCM ()
 ptsRule' a b c = do
   c' <- inferFunSort a b
-  equalSort c' c -- CUMULATIVITY: leqSort c' c
+  ifM (optCumulativity <$> pragmaOptions)
+    (leqSort c' c)
+    (equalSort c' c)
 
 hasPTSRule :: Dom Type -> Abs Sort -> TCM ()
 hasPTSRule a b = void $ inferPiSort a b
@@ -146,30 +155,39 @@ shouldBeSort t = ifIsSort t return (typeError $ ShouldBeASort t)
 --
 --   Precondition: given term is a well-sorted type.
 sortOf
-  :: forall m. (MonadReduce m, MonadTCEnv m, HasBuiltins m, HasConstInfo m)
+  :: forall m. (MonadReduce m, MonadTCEnv m, MonadAddContext m, HasBuiltins m, HasConstInfo m)
   => Term -> m Sort
-sortOf t = elimView True t >>= \case
-  Pi a b     -> return $ piSort a (getSort <$> b)
-  Sort s     -> do
-    ui <- univInf
-    return $ univSort ui s
-  Var i es   -> do
-    a <- typeOfBV i
-    sortOfE a (Var i) es
-  Def f es   -> do
-    a <- defType <$> getConstInfo f
-    sortOfE a (Def f) es
-  MetaV x es -> do
-    a <- metaType x
-    sortOfE a (MetaV x) es
-  Lam{}      -> __IMPOSSIBLE__
-  Con{}      -> __IMPOSSIBLE__
-  Lit{}      -> __IMPOSSIBLE__
-  Level{}    -> __IMPOSSIBLE__
-  DontCare{} -> __IMPOSSIBLE__
-  Dummy s _  -> __IMPOSSIBLE_VERBOSE__ s
+sortOf t = do
+  reportSDoc "tc.sort" 40 $ "sortOf" <+> prettyTCM t
+  sortOfT =<< elimView True t
 
   where
+    sortOfT :: Term -> m Sort
+    sortOfT = \case
+      Pi adom b -> do
+        let a = unEl $ unDom adom
+        sa <- sortOf a
+        sb <- mapAbstraction adom (sortOf . unEl) b
+        return $ piSort (adom $> El sa a) sb
+      Sort s     -> do
+        ui <- univInf
+        return $ univSort ui s
+      Var i es   -> do
+        a <- typeOfBV i
+        sortOfE a (Var i) es
+      Def f es   -> do
+        a <- defType <$> getConstInfo f
+        sortOfE a (Def f) es
+      MetaV x es -> do
+        a <- metaType x
+        sortOfE a (MetaV x) es
+      Lam{}      -> __IMPOSSIBLE__
+      Con{}      -> __IMPOSSIBLE__
+      Lit{}      -> __IMPOSSIBLE__
+      Level{}    -> __IMPOSSIBLE__
+      DontCare{} -> __IMPOSSIBLE__
+      Dummy s _  -> __IMPOSSIBLE_VERBOSE__ s
+
     sortOfE :: Type -> (Elims -> Term) -> Elims -> m Sort
     sortOfE a hd []     = ifIsSort a return __IMPOSSIBLE__
     sortOfE a hd (e:es) = case e of

@@ -147,14 +147,12 @@ instance ExprLike Expr where
       Rec ei bs               -> Rec ei <$> recurse bs
       RecUpdate ei e bs       -> RecUpdate ei <$> recurse e <*> recurse bs
       ScopedExpr sc e         -> ScopedExpr sc <$> recurse e
-      QuoteGoal ei n e        -> QuoteGoal ei n <$> recurse e
-      QuoteContext ei         -> pure e0
       Quote{}                 -> pure e0
       QuoteTerm{}             -> pure e0
       Unquote{}               -> pure e0
       DontCare e              -> DontCare <$> recurse e
       PatternSyn{}            -> pure e0
-      Tactic ei e xs ys       -> Tactic ei <$> recurse e <*> recurse xs <*> recurse ys
+      Tactic ei e xs          -> Tactic ei <$> recurse e <*> recurse xs
       Macro{}                 -> pure e0
 
   foldExpr f e =
@@ -184,12 +182,10 @@ instance ExprLike Expr where
       Rec _ as             -> m `mappend` fold as
       RecUpdate _ e as     -> m `mappend` fold e `mappend` fold as
       ScopedExpr _ e       -> m `mappend` fold e
-      QuoteGoal _ _ e      -> m `mappend` fold e
-      QuoteContext _       -> m
       Quote{}              -> m
       QuoteTerm{}          -> m
       Unquote{}            -> m
-      Tactic _ e xs ys     -> m `mappend` fold e `mappend` fold xs `mappend` fold ys
+      Tactic _ e xs        -> m `mappend` fold e `mappend` fold xs
       DontCare e           -> m `mappend` fold e
    where
      m    = f e
@@ -221,12 +217,10 @@ instance ExprLike Expr where
       Rec ei bs               -> f =<< Rec ei <$> trav bs
       RecUpdate ei e bs       -> f =<< RecUpdate ei <$> trav e <*> trav bs
       ScopedExpr sc e         -> f =<< ScopedExpr sc <$> trav e
-      QuoteGoal ei n e        -> f =<< QuoteGoal ei n <$> trav e
-      QuoteContext{}          -> f e
       Quote{}                 -> f e
       QuoteTerm{}             -> f e
       Unquote{}               -> f e
-      Tactic ei e xs ys       -> f =<< Tactic ei <$> trav e <*> trav xs <*> trav ys
+      Tactic ei e xs          -> f =<< Tactic ei <$> trav e <*> trav xs
       DontCare e              -> f =<< DontCare <$> trav e
       PatternSyn{}            -> f e
       Macro{}                 -> f e
@@ -336,10 +330,10 @@ instance ExprLike RHS where
       RewriteRHS xes spats rhs ds -> RewriteRHS <$> rec xes <*> pure spats <*> rec rhs <*> rec ds
     where rec e = recurseExpr f e
 
-instance (ExprLike p, ExprLike e) => ExprLike (RewriteEqn' p e) where
+instance (ExprLike qn, ExprLike p, ExprLike e) => ExprLike (RewriteEqn' qn p e) where
   recurseExpr f = \case
-    Rewrite es -> Rewrite <$> recurseExpr f es
-    Invert pes -> Invert <$> recurseExpr f pes
+    Rewrite es    -> Rewrite <$> recurseExpr f es
+    Invert qn pes -> Invert <$> recurseExpr f qn <*> recurseExpr f pes
 
 instance ExprLike WhereDeclarations where
   recurseExpr f (WhereDecls a b) = WhereDecls a <$> recurseExpr f b
@@ -369,7 +363,8 @@ instance ExprLike Pragma where
 instance ExprLike LHS where
   recurseExpr f (LHS i p) = LHS i <$> recurseExpr f p
 
-instance ExprLike a => ExprLike (LHSCore' a) where
+instance ExprLike a => ExprLike (LHSCore' a)   where
+instance ExprLike a => ExprLike (WithHiding a) where
 
 instance ExprLike SpineLHS where
   recurseExpr f (SpineLHS i x ps) = SpineLHS i x <$> recurseExpr f ps

@@ -31,10 +31,9 @@ instance MentionsMeta Term where
       mm v = mentionsMetas xs v
 
 instance MentionsMeta Level where
-  mentionsMetas xs (Max as) = mentionsMetas xs as
+  mentionsMetas xs (Max _ as) = mentionsMetas xs as
 
 instance MentionsMeta PlusLevel where
-  mentionsMetas xs ClosedLevel{} = False
   mentionsMetas xs (Plus _ a) = mentionsMetas xs a
 
 instance MentionsMeta LevelAtom where
@@ -119,6 +118,7 @@ instance MentionsMeta Constraint where
     UnquoteTactic bl tac hole goal -> case bl of
       Nothing -> False
       Just m  -> HashSet.member m xs
+    CheckMetaInst m     -> True   -- TODO
     where
       mm v = mentionsMetas xs v
 

@@ -52,8 +52,8 @@ import Agda.TypeChecking.Reduce (instantiate)
 
 import Agda.Utils.Except ( MonadError(catchError) )
 import Agda.Utils.FileName
+import Agda.Utils.Float  ( toStringWithoutDotZero )
 import Agda.Utils.Function
-import Agda.Utils.List
 import Agda.Utils.Maybe
 import Agda.Utils.Null
 import Agda.Utils.NonemptyList
@@ -151,6 +151,7 @@ errorString err = case err of
   MetaCannotDependOn{}                     -> "MetaCannotDependOn"
   MetaOccursInItself{}                     -> "MetaOccursInItself"
   MetaIrrelevantSolution{}                 -> "MetaIrrelevantSolution"
+  MetaErasedSolution{}                     -> "MetaErasedSolution"
   ModuleArityMismatch{}                    -> "ModuleArityMismatch"
   ModuleDefinedInOtherFile {}              -> "ModuleDefinedInOtherFile"
   ModuleNameUnexpected{}                   -> "ModuleNameUnexpected"
@@ -218,8 +219,9 @@ errorString err = case err of
   VariableIsOfUnusableCohesion{}           -> "VariableIsOfUnusableCohesion"
   UnequalBecauseOfUniverseConflict{}       -> "UnequalBecauseOfUniverseConflict"
   UnequalRelevance{}                       -> "UnequalRelevance"
+  UnequalQuantity{}                        -> "UnequalQuantity"
   UnequalHiding{}                          -> "UnequalHiding"
---  UnequalLevel{}                           -> "UnequalLevel" -- UNUSED
+  UnequalLevel{}                           -> "UnequalLevel"
   UnequalSorts{}                           -> "UnequalSorts"
   UnequalTerms{}                           -> "UnequalTerms"
   UnequalTypes{}                           -> "UnequalTypes"
@@ -545,9 +547,8 @@ instance PrettyTCM TypeError where
                 AsTypes     -> [])
           ++ [return d]
 
--- UnequalLevel is UNUSED
---   UnequalLevel cmp s t -> fsep $
---     [prettyTCM s, notCmp cmp, prettyTCM t]
+    UnequalLevel cmp s t -> fsep $
+      [prettyTCM s, notCmp cmp, prettyTCM t]
 
 -- UnequalTelescopes is UNUSED
 --   UnequalTelescopes cmp a b -> fsep $
@@ -559,6 +560,10 @@ instance PrettyTCM TypeError where
     UnequalRelevance cmp a b -> fsep $
       [prettyTCM a, notCmp cmp, prettyTCM b] ++
       pwords "because one is a relevant function type and the other is an irrelevant function type"
+
+    UnequalQuantity cmp a b -> fsep $
+      [prettyTCM a, notCmp cmp, prettyTCM b] ++
+      pwords "because one is a non-erased function type and the other is an erased function type"
 
     UnequalHiding a b -> fsep $
       [prettyTCM a, "!=", prettyTCM b] ++
@@ -622,6 +627,11 @@ instance PrettyTCM TypeError where
     MetaIrrelevantSolution m _ -> fsep $
       pwords "Cannot instantiate the metavariable because (part of) the" ++
       pwords "solution was created in an irrelevant context."
+
+    -- The following error is caught and reraised as GenericDocError in Occurs.hs
+    MetaErasedSolution m _ -> fsep $
+      pwords "Cannot instantiate the metavariable because (part of) the" ++
+      pwords "solution was created in an erased context."
 
     BuiltinMustBeConstructor s e -> fsep $
       [prettyA e] ++ pwords "must be a constructor in the binding to builtin" ++ [text s]
@@ -725,31 +735,9 @@ instance PrettyTCM TypeError where
       , prettyTCM q
       ] ++ pwords "is abstract, thus, not in scope here"
 
-    NotInScope xs -> do
-      inscope <- Set.toList . concreteNamesInScope <$> getScope
-      fsep (pwords "Not in scope:") $$ nest 2 (vcat $ map (name inscope) xs)
-      where
-      name inscope x =
-        fsep [ pretty x
-             , "at" <+> prettyTCM (getRange x)
-             , suggestion inscope x
-             ]
-      suggestion inscope x = nest 2 $ par $
-        [ "did you forget space around the ':'?"  | ':' `elem` s ] ++
-        [ "did you forget space around the '->'?" | isInfixOf "->" s ] ++
-        [ sep [ "did you mean"
-              , nest 2 $ vcat (punctuate " or" $ map (\ y -> text $ "'" ++ y ++ "'") ys) <> "?" ]
-          | not $ null ys ]
-        where
-          s = P.prettyShow x
-          par []  = empty
-          par [d] = parens d
-          par ds  = parens $ vcat ds
-
-          strip x = map toLower $ filter (/= '_') $ P.prettyShow $ C.unqualify x
-          maxDist n = div n 3
-          close a b = editDistance a b <= maxDist (length a)
-          ys = map P.prettyShow $ filter (close (strip x) . strip) inscope
+    NotInScope xs ->
+      -- using the warning version to avoid code duplication
+      prettyTCM (NotInScopeW xs)
 
     NoSuchModule x -> fsep $ pwords "No module" ++ [pretty x] ++ pwords "in scope"
 
@@ -970,7 +958,7 @@ instance PrettyTCM TypeError where
              (case sectLevel sect of
                 Nothing          -> ""
                 Just Unrelated   -> ", unrelated"
-                Just (Related n) -> ", level " ++ show n) ++
+                Just (Related l) -> ", level " ++ toStringWithoutDotZero l) ++
              ")")
             Boxes.//
           strut

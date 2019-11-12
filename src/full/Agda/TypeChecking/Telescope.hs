@@ -13,7 +13,6 @@ import Data.Maybe
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
-import Agda.Syntax.Position
 
 import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Monad
@@ -84,7 +83,7 @@ teleArgs tel =
 -- UNUSED
 -- withNamedArgsFromTel :: [a] -> Telescope -> [NamedArg a]
 -- xs `withNamedArgsFromTel` tel =
---   [ Arg info (Named (Just $ Ranged noRange $ argNameToString name) x)
+--   [ Arg info (Named (Just $ Ranged empty $ argNameToString name) x)
 --   | (x, Dom {domInfo = info, unDom = (name,_)}) <- zip xs l ]
 --   where l = telToList tel
 
@@ -485,11 +484,10 @@ isPath
   => Type -> m (Maybe (Dom Type, Abs Type))
 isPath t = either Just (const Nothing) <$> pathViewAsPi t
 
-telePatterns :: (DeBruijn a, DeBruijn (Pattern' a)) =>
-                 Telescope -> Boundary -> [NamedArg (Pattern' a)]
+telePatterns :: DeBruijn a => Telescope -> Boundary -> [NamedArg (Pattern' a)]
 telePatterns = telePatterns' teleNamedArgs
 
-telePatterns' :: (DeBruijn a, DeBruijn (Pattern' a)) =>
+telePatterns' :: DeBruijn a =>
                 (forall a. (DeBruijn a) => Telescope -> [NamedArg a]) -> Telescope -> Boundary -> [NamedArg (Pattern' a)]
 telePatterns' f tel [] = f tel
 telePatterns' f tel boundary = recurse $ f tel

@@ -19,6 +19,7 @@ import Agda.Syntax.Position
 
 import Agda.Interaction.Options.IORefs (UnicodeOrAscii(..), unicodeOrAscii)
 
+import Agda.Utils.Float (toStringWithoutDotZero)
 import Agda.Utils.Function
 import Agda.Utils.Functor
 import Agda.Utils.Maybe
@@ -229,7 +230,6 @@ instance Pretty Expr where
             Lit l            -> pretty l
             QuestionMark _ n -> "?" <> maybe empty (text . show) n
             Underscore _ n   -> maybe underscore text n
---          Underscore _ n   -> underscore <> maybe empty (text . show) n
             App _ _ _        ->
                 case appView e of
                     AppView e1 args     ->
@@ -283,16 +283,10 @@ instance Pretty Expr where
               sep ["record" <+> pretty e, bracesAndSemicolons (map pretty xs)]
             ETel []  -> "()"
             ETel tel -> fsep $ map pretty tel
-            QuoteGoal _ x e -> sep ["quoteGoal" <+> pretty x <+> "in",
-                                    nest 2 $ pretty e]
-            QuoteContext _ -> "quoteContext"
             Quote _ -> "quote"
             QuoteTerm _ -> "quoteTerm"
-            Unquote _ -> "unquote"
-            Tactic _ t es ->
-              sep [ "tactic" <+> pretty t
-                  , fsep [ "|" <+> pretty e | e <- es ]
-                  ]
+            Unquote _  -> "unquote"
+            Tactic _ t -> "tactic" <+> pretty t
             -- Andreas, 2011-10-03 print irrelevant things as .(e)
             DontCare e -> "." <> parens (pretty e)
             Equal _ a b -> pretty a <+> "=" <+> pretty b
@@ -625,6 +619,7 @@ instance Pretty Pragma where
         NonTerminating         -> "NON_TERMINATING"
         Terminating            -> "TERMINATING"
         TerminationMeasure _ x -> hsep $ ["MEASURE", pretty x]
+    pretty (NoCoverageCheckPragma _) = "NON_COVERING"
     pretty (WarningOnUsage _ nm str) = hsep [ "WARNING_ON_USAGE", pretty nm, text str ]
     pretty (WarningOnImport _ str)   = hsep [ "WARNING_ON_IMPORT", text str ]
     pretty (CatchallPragma _) = "CATCHALL"
@@ -636,7 +631,7 @@ instance Pretty Pragma where
 
 instance Pretty Fixity where
     pretty (Fixity _ Unrelated   _)   = __IMPOSSIBLE__
-    pretty (Fixity _ (Related n) ass) = s <+> text (show n)
+    pretty (Fixity _ (Related d) ass) = s <+> text (toStringWithoutDotZero d)
       where
       s = case ass of
             LeftAssoc  -> "infixl"
@@ -748,24 +743,32 @@ instance (Pretty a, Pretty b) => Pretty (ImportDirective' a b) where
             , rename $ impRenaming i
             ]
         where
-            public True  = "public"
-            public False = empty
+            public Just{}  = "public"
+            public Nothing = empty
 
             prettyHiding [] = empty
             prettyHiding xs = "hiding" <+> parens (fsep $ punctuate ";" $ map pretty xs)
 
             rename [] = empty
             rename xs = hsep [ "renaming"
-                             , parens $ fsep $ punctuate ";" $ map pr xs
+                             , parens $ fsep $ punctuate ";" $ map pretty xs
                              ]
-
-            pr r = hsep [ pretty (renFrom r), "to", pretty (renTo r) ]
 
 instance (Pretty a, Pretty b) => Pretty (Using' a b) where
     pretty UseEverything = empty
     pretty (Using xs)    =
         "using" <+> parens (fsep $ punctuate ";" $ map pretty xs)
 
+instance (Pretty a, Pretty b) => Pretty (Renaming' a b) where
+    pretty (Renaming from to mfx _r) = hsep
+      [ pretty from
+      , "to"
+      , maybe empty pretty mfx
+      , case to of
+          ImportedName a   -> pretty a
+          ImportedModule b -> pretty b   -- don't print "module" here
+      ]
+
 instance (Pretty a, Pretty b) => Pretty (ImportedName' a b) where
-    pretty (ImportedName x)     = pretty x
-    pretty (ImportedModule x)   = "module" <+> pretty x
+    pretty (ImportedName   a) = pretty a
+    pretty (ImportedModule b) = "module" <+> pretty b

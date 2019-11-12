@@ -98,7 +98,13 @@ parseExprIn ii rng s = do
     updateMetaVarRange mId rng
     mi  <- getMetaInfo <$> lookupMeta mId
     e   <- parseExpr rng s
-    concreteToAbstract (clScope mi) e
+    -- Andreas, 2019-08-19, issue #4007
+    -- We need to be in the TCEnv of the meta variable
+    -- such that the scope checker can label the clause
+    -- of a parsed extended lambda as IsAbstract if the
+    -- interaction point was created in AbstractMode.
+    withMetaInfo mi $
+      concreteToAbstract (clScope mi) e
 
 giveExpr :: UseForce -> Maybe InteractionId -> MetaId -> Expr -> TCM ()
 -- When translator from internal to abstract is given, this function might return
@@ -108,10 +114,9 @@ giveExpr force mii mi e = do
     -- In the context (incl. signature) of the meta variable,
     -- type check expression and assign meta
     withMetaInfo (getMetaInfo mv) $ do
-      metaTypeCheck mv (mvJudgement mv)
-  where
-    metaTypeCheck mv IsSort{}      = __IMPOSSIBLE__
-    metaTypeCheck mv (HasType _ t) = do
+      let t = case mvJudgement mv of
+                IsSort{}    -> __IMPOSSIBLE__
+                HasType _ _ t -> t
       reportSDoc "interaction.give" 20 $
         "give: meta type =" TP.<+> prettyTCM t
       -- Here, we must be in the same context where the meta was created.
@@ -119,8 +124,12 @@ giveExpr force mii mi e = do
       ctx <- getContextArgs
       t' <- t `piApplyM` permute (takeP (length ctx) $ mvPermutation mv) ctx
       traceCall (CheckExprCall CmpLeq e t') $ do
-        reportSDoc "interaction.give" 20 $
-          "give: instantiated meta type =" TP.<+> prettyTCM t'
+        reportSDoc "interaction.give" 20 $ do
+          a <- asksTC envAbstractMode
+          TP.hsep
+            [ TP.text ("give(" ++ show a ++ "): instantiated meta type =")
+            , prettyTCM t'
+            ]
         v <- checkExpr e t'
         case mvInstantiation mv of
 
@@ -158,7 +167,7 @@ giveExpr force mii mi e = do
           -- Double check.
           reportSDoc "interaction.give" 20 $ "give: double checking"
           vfull <- instantiateFull v
-          checkInternal vfull t'
+          checkInternal vfull CmpLeq t'
 
 -- | After a give, redo termination etc. checks for function which was complemented.
 redoChecks :: Maybe InteractionId -> TCM ()
@@ -392,7 +401,8 @@ outputFormId (OutputForm _ _ o) = out o
       PostponedCheckFunDef{}     -> __IMPOSSIBLE__
 
 instance Reify ProblemConstraint (Closure (OutputForm Expr Expr)) where
-  reify (PConstr pids cl) = enterClosure cl $ \c -> buildClosure =<< (OutputForm (getRange c) (Set.toList pids) <$> reify c)
+  reify (PConstr pids cl) = withClosure cl $ \ c ->
+    OutputForm (getRange c) (Set.toList pids) <$> reify c
 
 reifyElimToExpr :: MonadReify m => I.Elim -> m Expr
 reifyElimToExpr e = case e of
@@ -433,7 +443,7 @@ instance Reify Constraint (OutputConstraint Expr Expr) where
           BlockedConst t -> do
             e  <- reify t
             return $ Assign m' e
-          PostponedTypeCheckingProblem cl _ -> enterClosure cl $ \p -> case p of
+          PostponedTypeCheckingProblem cl _ -> enterClosure cl $ \case
             CheckExpr cmp e a -> do
                 a  <- reify a
                 return $ TypedAssign m' e a
@@ -469,6 +479,10 @@ instance Reify Constraint (OutputConstraint Expr Expr) where
     reify (HasPTSRule a b) = do
       (a,(x,b)) <- reify (unDom a,b)
       return $ PTSInstance a b
+    reify (CheckMetaInst m) = do
+      t <- jMetaType . mvJudgement <$> lookupMeta m
+      OfType <$> reify (MetaV m []) <*> reify t
+
 
 instance (Pretty a, Pretty b) => Pretty (OutputForm a b) where
   pretty (OutputForm r pids c)
@@ -639,7 +653,7 @@ getSolvedInteractionPoints all norm = concat <$> do
               v <- instantiate v
               let isMeta = case v of MetaV{} -> True; _ -> False
               if isMeta && not all then return [] else do
-                e <- reify =<< normalForm norm v
+                e <- blankNotInScope =<< reify =<< normalForm norm v
                 return [(i, m, ScopedExpr scope e)]
             unsol = return []
         case mvInstantiation mv of
@@ -657,7 +671,7 @@ typeOfMetaMI norm mi =
    where
     rewriteJudg :: MetaVariable -> Judgement MetaId ->
                    TCM (OutputConstraint Expr NamedMeta)
-    rewriteJudg mv (HasType i t) = do
+    rewriteJudg mv (HasType i cmp t) = do
       ms <- getMetaNameSuggestion i
       -- Andreas, 2019-03-17, issue #3638:
       -- Need to put meta type into correct context _before_ normalizing,
@@ -708,26 +722,47 @@ typesOfHiddenMetas norm = liftTCM $ do
       M.BlockedConst{} -> False
       M.PostponedTypeCheckingProblem{} -> False
 
+-- | Create type of application of new helper function that would solve the goal.
 metaHelperType :: Rewrite -> InteractionId -> Range -> String -> TCM (OutputConstraint' Expr Expr)
 metaHelperType norm ii rng s = case words s of
   []    -> failure
-  f : _ -> do
+  f : _ -> withInteractionId ii $ do
     ensureName f
     A.Application h args <- A.appView . getBody . deepUnscope <$> parseExprIn ii rng ("let " ++ f ++ " = _ in " ++ s)
-    withInteractionId ii $ do
+    inCxt   <- hasElem <$> getContextNames
+    cxtArgs <- getContextArgs
+    a0      <- (`piApply` cxtArgs) <$> (getMetaType =<< lookupInteractionId ii)
+    case mapM (isVar . namedArg) args >>= \ xs -> xs <$ guard (all inCxt xs) of
+
+     -- Andreas, 2019-10-11
+     -- If all arguments are variables, there is no need to abstract.
+     -- We simply make exactly the given arguments visible and all other hidden.
+     Just xs -> do
+      let inXs = hasElem xs
+      let hideButXs dom = setHiding (if inXs $ fst $ unDom dom then NotHidden else Hidden) dom
+      tel  <- telFromList . map (fmap (first nameToArgName) . hideButXs) . reverse <$> getContext
+      OfType' h <$> do
+        -- Andreas, 2019-10-11: I actually prefer pi-types over ->.
+        localTC (\e -> e { envPrintDomainFreePi = True }) $ reify $ telePiVisible tel a0
+
+     -- If some arguments are not variables.
+     Nothing -> do
       cxtArgs  <- getContextArgs
       -- cleanupType relies on with arguments being named 'w',
       -- so we'd better rename any actual 'w's to avoid confusion.
-      tel      <- runIdentity . onNamesTel unW <$> getContextTelescope
-      a        <- runIdentity . onNames unW . (`piApply` cxtArgs) <$> (getMetaType =<< lookupInteractionId ii)
-      (vs, as) <- unzip <$> mapM (inferExpr . namedThing . unArg) args
+      tel  <- runIdentity . onNamesTel unW <$> getContextTelescope
+      let a = runIdentity . onNames unW $ a0
+      vtys <- mapM (\ a -> fmap (WithHiding (getHiding a) . fmap OtherType) $ inferExpr $ namedArg a) args
       -- Remember the arity of a
       TelV atel _ <- telView a
       let arity = size atel
-          (delta1, delta2, _, a', as', vs') = splitTelForWith tel a (map OtherType as) vs
+          (delta1, delta2, _, a', vtys') = splitTelForWith tel a vtys
       a <- localTC (\e -> e { envPrintDomainFreePi = True }) $ do
-        reify =<< cleanupType arity args =<< normalForm norm =<< fst <$> withFunctionType delta1 vs' as' delta2 a'
-      reportSDoc "interaction.helper" 10 $ TP.vcat
+        reify =<< cleanupType arity args =<< normalForm norm =<< fst <$> withFunctionType delta1 vtys' delta2 a'
+      reportSDoc "interaction.helper" 10 $ TP.vcat $
+        let extractOtherType = \case { OtherType a -> a; _ -> __IMPOSSIBLE__ } in
+        let (vs, as)   = unzipWith (fmap extractOtherType . whThing) vtys in
+        let (vs', as') = unzipWith (fmap extractOtherType . whThing) vtys' in
         [ "generating helper function"
         , TP.nest 2 $ "tel    = " TP.<+> inTopContext (prettyTCM tel)
         , TP.nest 2 $ "a      = " TP.<+> prettyTCM a
@@ -739,26 +774,32 @@ metaHelperType norm ii rng s = case words s of
         , TP.nest 2 $ "as'    = " TP.<+> inTopContext (addContext delta1 $ prettyTCM as')
         , TP.nest 2 $ "vs'    = " TP.<+> inTopContext (addContext delta1 $ prettyTCM vs')
         ]
-      return (OfType' h a)
+      return $ OfType' h a
   where
     failure = typeError $ GenericError $ "Expected an argument of the form f e1 e2 .. en"
     ensureName f = do
       ce <- parseExpr rng f
-      case ce of
-        C.Ident{} -> return ()
-        C.RawApp _ [C.Ident{}] -> return ()
-        _ -> do
+      flip (caseMaybe $ isName ce) (\ _ -> return ()) $ do
          reportSLn "interaction.helper" 10 $ "ce = " ++ show ce
          failure
+    isName :: C.Expr -> Maybe C.Name
+    isName = \case
+      C.Ident (C.QName x)              -> Just x
+      C.RawApp _ [C.Ident (C.QName x)] -> Just x
+      _ -> Nothing
+    isVar :: A.Expr -> Maybe A.Name
+    isVar = \case
+      A.Var x -> Just x
+      _ -> Nothing
     cleanupType arity args t = do
       -- Get the arity of t
       TelV ttel _ <- telView t
-      -- Compute the number or pi-types subject to stripping.
+      -- Compute the number of pi-types subject to stripping.
       let n = size ttel - arity
       -- It cannot be negative, otherwise we would have performed a
       -- negative number of with-abstractions.
       unless (n >= 0) __IMPOSSIBLE__
-      return $ evalState (renameVars $ hiding args $ stripUnused n t) args
+      return $ evalState (renameVars $ stripUnused n t) args
 
     getBody (A.Let _ _ e)      = e
     getBody _                  = __IMPOSSIBLE__
@@ -776,12 +817,6 @@ metaHelperType norm ii rng s = case words s of
 
     -- renameVars = onNames (stringToArgName <.> renameVar . argNameToString)
     renameVars = onNames renameVar
-
-    hiding args (El s v) = El s $ hidingTm args v
-    hidingTm (arg:args) (I.Pi a b) | absName b == "w" =
-      I.Pi (setHiding (getHiding arg) a) (hiding args <$> b)
-    hidingTm args (I.Pi a b) = I.Pi a (hiding args <$> b)
-    hidingTm _ a = a
 
     -- onNames :: Applicative m => (ArgName -> m ArgName) -> Type -> m Type
     onNames :: Applicative m => (String -> m String) -> Type -> m Type
@@ -817,12 +852,15 @@ metaHelperType norm ii rng s = case words s of
     renameVar s   = pure s
 
     betterName = do
-      arg : args <- get
-      put args
-      return $ if
-        | Arg _ (Named _ (A.Var x)) <- arg -> prettyShow $ A.nameConcrete x
-        | Just x <- bareNameOf arg         -> argNameToString x
-        | otherwise                        -> "w"
+      xs <- get
+      case xs of
+        []         -> __IMPOSSIBLE__
+        arg : args -> do
+          put args
+          return $ if
+            | Arg _ (Named _ (A.Var x)) <- arg -> prettyShow $ A.nameConcrete x
+            | Just x <- bareNameOf arg         -> argNameToString x
+            | otherwise                        -> "w"
 
 
 -- | Gives a list of names and corresponding types.
@@ -889,7 +927,7 @@ introTactic pmLambda ii = do
   mi <- lookupInteractionId ii
   mv <- lookupMeta mi
   withMetaInfo (getMetaInfo mv) $ case mvJudgement mv of
-    HasType _ t -> do
+    HasType _ _ t -> do
         t <- reduce =<< piApplyM t =<< getContextArgs
         -- Andreas, 2013-03-05 Issue 810: skip hidden domains in introduction
         -- of constructor.

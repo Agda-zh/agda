@@ -161,7 +161,6 @@ elimView
   => Bool -> Term -> m Term
 elimView loneProjToLambda v = do
   reportSDoc "tc.conv.elim" 30 $ "elimView of " <+> prettyTCM v
-  reportSLn  "tc.conv.elim" 50 $ "v = " ++ show v
   v <- reduceProjectionLike v
   reportSDoc "tc.conv.elim" 40 $
     "elimView (projections reduced) of " <+> prettyTCM v
@@ -215,7 +214,7 @@ eligibleForProjectionLike d = eligible . theDef <$> getConstInfo d
 --
 --      d. @f@ cannot match deeply.
 --
---      e. @f@s body may not mention the paramters.
+--      e. @f@s body may not mention the parameters.
 --
 --      f. A rhs of @f@ cannot be a record expression, since this will be
 --         translated to copatterns by recordExpressionsToCopatterns.
@@ -256,7 +255,7 @@ makeProjection x = whenM (optProjectionLike <$> pragmaOptions) $ do
     -- outside the abstract block.
     def@Function{funProjection = Nothing, funClauses = cls,
                  funSplitTree = st0, funCompiled = cc0, funInv = NotInjective,
-                 funMutual = Just [], -- Andreas, 2012-09-28: only consider non-mutual funs (or those whose recursion status has not yet been determined)
+                 funMutual = Just [], -- Andreas, 2012-09-28: only consider non-mutual funs
                  funAbstr = ConcreteDef} -> do
       ps0 <- filterM validProj $ candidateArgs [] t
       reportSLn "tc.proj.like" 30 $ if null ps0 then "  no candidates found"

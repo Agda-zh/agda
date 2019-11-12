@@ -1,4 +1,5 @@
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE NondecreasingIndentation #-}
 
 {-| Compile-time irrelevance.
 
@@ -109,7 +110,7 @@ workOnTypes :: (MonadTCEnv m, HasOptions m, MonadDebug m)
             => m a -> m a
 workOnTypes cont = do
   allowed <- optExperimentalIrrelevance <$> pragmaOptions
-  verboseBracket "tc.irr" 20 "workOnTypes" $ workOnTypes' allowed cont
+  verboseBracket "tc.irr" 60 "workOnTypes" $ workOnTypes' allowed cont
 
 -- | Internal workhorse, expects value of --experimental-irrelevance flag
 --   as argument.
@@ -311,7 +312,7 @@ instance UsableRelevance Term where
     MetaV m vs -> do
       mrel <- getMetaRelevance <$> lookupMeta m
       return (mrel `moreRelevant` rel) `and2M` usableRel rel vs
-    DontCare _ -> return $ isIrrelevant rel
+    DontCare v -> usableRel rel v -- TODO: allow irrelevant things to be used in DontCare position?
     Dummy{}  -> return True
 
 instance UsableRelevance a => UsableRelevance (Type' a) where
@@ -330,11 +331,10 @@ instance UsableRelevance Sort where
     DummyS{} -> return True
 
 instance UsableRelevance Level where
-  usableRel rel (Max ls) = usableRel rel ls
+  usableRel rel (Max _ ls) = usableRel rel ls
 
 instance UsableRelevance PlusLevel where
-  usableRel rel ClosedLevel{} = return True
-  usableRel rel (Plus _ l)    = usableRel rel l
+  usableRel rel (Plus _ l) = usableRel rel l
 
 instance UsableRelevance LevelAtom where
   usableRel rel l = case l of
@@ -436,7 +436,7 @@ instance UsableModality Sort where
   --   DummyS{} -> return True
 
 instance UsableModality Level where
-  usableMod mod (Max ls) = usableRel (getRelevance mod) ls
+  usableMod mod (Max _ ls) = usableRel (getRelevance mod) ls
 
 -- instance UsableModality PlusLevel where
 --   usableMod mod ClosedLevel{} = return True
@@ -480,10 +480,12 @@ instance (Subst t a, UsableModality a) => UsableModality (Abs a) where
 
 -- | Is a type a proposition?  (Needs reduction.)
 
-isPropM :: (LensSort a, MonadReduce m) => a -> m Bool
-isPropM a = reduce (getSort a) <&> \case
-  Prop{} -> True
-  _      -> False
+isPropM :: (LensSort a, PrettyTCM a, MonadReduce m, MonadDebug m) => a -> m Bool
+isPropM a = do
+  traceSDoc "tc.prop" 80 ("Is " <+> prettyTCM a <+> "of sort" <+> prettyTCM (getSort a) <+> "in Prop?") $ do
+  reduce (getSort a) <&> \case
+    Prop{} -> True
+    _      -> False
 
-isIrrelevantOrPropM :: (LensRelevance a, LensSort a, MonadReduce m) => a -> m Bool
+isIrrelevantOrPropM :: (LensRelevance a, LensSort a, PrettyTCM a, MonadReduce m, MonadDebug m) => a -> m Bool
 isIrrelevantOrPropM x = return (isIrrelevant x) `or2M` isPropM x

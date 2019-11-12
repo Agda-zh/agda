@@ -113,7 +113,7 @@ instance PatternFrom Type Term NLPat where
       , " of type " <+> prettyTCM t
       ]
     let done = return $ PTerm v
-    case (unEl t , v) of
+    case (unEl t , stripDontCare v) of
       (Pi a b , _) -> do
         let body = raise 1 v `apply` [ Arg (domInfo a) $ var 0 ]
         p <- addContext a (patternFrom r (k+1) (absBody b) body)
@@ -166,17 +166,19 @@ instance PatternFrom Type Term NLPat where
         pa <- patternFrom r k () a
         pb <- addContext a (patternFrom r (k+1) () $ absBody b)
         return $ PPi pa (Abs (absName b) pb)
-      (_ , Sort s)     -> done
+      (_ , Sort s)     -> PSort <$> patternFrom r k () s
       (_ , Level l)    -> __IMPOSSIBLE__
       (_ , DontCare{}) -> done
       (_ , MetaV{})    -> __IMPOSSIBLE__
-      (_ , Dummy s _)    -> __IMPOSSIBLE_VERBOSE__ s
+      (_ , Dummy s _)  -> __IMPOSSIBLE_VERBOSE__ s
 
--- ^ Convert from a non-linear pattern to a term
+-- | Convert from a non-linear pattern to a term.
+
 class NLPatToTerm p a where
   nlPatToTerm
     :: (MonadReduce m, HasBuiltins m, HasConstInfo m, MonadDebug m)
     => p -> m a
+
   default nlPatToTerm ::
     ( NLPatToTerm p' a', Traversable f, p ~ f p', a ~ f a'
     , MonadReduce m, HasBuiltins m, HasConstInfo m, MonadDebug m
@@ -200,14 +202,15 @@ instance NLPatToTerm NLPat Term where
       Constructor{ conSrcCon = c } -> Con c ConOSystem <$> nlPatToTerm es
       _                            -> Def f <$> nlPatToTerm es
     PLam i u       -> Lam i <$> nlPatToTerm u
-    PPi a b        -> Pi <$> nlPatToTerm a <*> nlPatToTerm b
+    PPi a b        -> Pi    <$> nlPatToTerm a <*> nlPatToTerm b
+    PSort s        -> Sort  <$> nlPatToTerm s
     PBoundVar i es -> Var i <$> nlPatToTerm es
 
 instance NLPatToTerm NLPat Level where
   nlPatToTerm = nlPatToTerm >=> levelView
 
 instance NLPatToTerm NLPType Type where
-  nlPatToTerm (NLPType s a) = El <$> (nlPatToTerm s) <*> nlPatToTerm a
+  nlPatToTerm (NLPType s a) = El <$> nlPatToTerm s <*> nlPatToTerm a
 
 instance NLPatToTerm NLPSort Sort where
   nlPatToTerm (PType l) = Type <$> nlPatToTerm l
@@ -222,11 +225,11 @@ class NLPatVars a where
   nlPatVars :: a -> IntSet
   nlPatVars = nlPatVarsUnder 0
 
-instance (Foldable f, NLPatVars a) => NLPatVars (f a) where
+instance {-# OVERLAPPABLE #-} (Foldable f, NLPatVars a) => NLPatVars (f a) where
   nlPatVarsUnder k = foldMap $ nlPatVarsUnder k
 
 instance NLPatVars NLPType where
-  nlPatVarsUnder k (NLPType l a) = nlPatVarsUnder k l `IntSet.union` nlPatVarsUnder k a
+  nlPatVarsUnder k (NLPType l a) = nlPatVarsUnder k (l, a)
 
 instance NLPatVars NLPSort where
   nlPatVarsUnder k = \case
@@ -236,14 +239,22 @@ instance NLPatVars NLPSort where
     PSizeUniv -> empty
 
 instance NLPatVars NLPat where
-  nlPatVarsUnder k p =
-    case p of
+  nlPatVarsUnder k = \case
       PVar i _  -> singleton $ i - k
       PDef _ es -> nlPatVarsUnder k es
-      PLam _ p' -> nlPatVarsUnder (k+1) $ unAbs p'
-      PPi a b   -> nlPatVarsUnder k a `IntSet.union` nlPatVarsUnder (k+1) (unAbs b)
+      PLam _ p  -> nlPatVarsUnder k p
+      PPi a b   -> nlPatVarsUnder k (a, b)
+      PSort s   -> nlPatVarsUnder k s
       PBoundVar _ es -> nlPatVarsUnder k es
       PTerm{}   -> empty
+
+instance (NLPatVars a, NLPatVars b) => NLPatVars (a,b) where
+  nlPatVarsUnder k (a,b) = nlPatVarsUnder k a `mappend` nlPatVarsUnder k b
+
+instance NLPatVars a => NLPatVars (Abs a) where
+  nlPatVarsUnder k = \case
+    Abs   _ v -> nlPatVarsUnder (k+1) v
+    NoAbs _ v -> nlPatVarsUnder k v
 
 -- | Get all symbols that a non-linear pattern matches against
 class GetMatchables a where
@@ -268,11 +279,19 @@ instance GetMatchables NLPat where
       PDef f _       -> singleton f
       PLam _ x       -> getMatchables x
       PPi a b        -> getMatchables (a,b)
+      PSort s        -> getMatchables s
       PBoundVar i es -> getMatchables es
       PTerm u        -> getMatchables u
 
 instance GetMatchables NLPType where
   getMatchables = getMatchables . nlpTypeUnEl
+
+instance GetMatchables NLPSort where
+  getMatchables = \case
+    PType l   -> getMatchables l
+    PProp l   -> getMatchables l
+    PInf      -> empty
+    PSizeUniv -> empty
 
 instance GetMatchables Term where
   getMatchables = getDefs' __IMPOSSIBLE__ singleton
@@ -280,15 +299,18 @@ instance GetMatchables Term where
 instance GetMatchables RewriteRule where
   getMatchables = getMatchables . rewPats
 
--- Only computes free variables that are not bound (i.e. those in a PTerm)
+-- | Only computes free variables that are not bound (see 'nlPatVars'),
+--   i.e., those in a 'PTerm'.
+
 instance Free NLPat where
-  freeVars' p = case p of
-    PVar _ _ -> mempty
-    PDef _ es -> freeVars' es
-    PLam _ u -> freeVars' u
-    PPi a b -> freeVars' (a,b)
+  freeVars' = \case
+    PVar _ _       -> mempty
+    PDef _ es      -> freeVars' es
+    PLam _ u       -> freeVars' u
+    PPi a b        -> freeVars' (a,b)
+    PSort s        -> freeVars' s
     PBoundVar _ es -> freeVars' es
-    PTerm t -> freeVars' t
+    PTerm t        -> freeVars' t
 
 instance Free NLPType where
   freeVars' (NLPType s a) =

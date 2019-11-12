@@ -34,6 +34,7 @@ import qualified Agda.Benchmarking as Bench
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 
+import Agda.TypeChecking.Constraints () -- instances
 import Agda.TypeChecking.Monad
 import qualified Agda.TypeChecking.Monad.Benchmark as Bench
 import Agda.TypeChecking.Reduce
@@ -173,6 +174,35 @@ variableCheck xs mi q = All $
       -- be used in irrelevant position (rhs).
       getModality o `moreUsableModality` q
 
+-- | Occurs check fails if a defined name is not available
+--   since it was declared in irrelevant or erased context.
+definitionCheck :: QName -> OccursM ()
+definitionCheck d = do
+  cxt <- ask
+  let irr = isIrrelevant cxt
+      er  = hasQuantity0 cxt
+      m   = occMeta $ feExtra cxt
+  -- Anything goes if we are both irrelevant and erased.
+  -- Otherwise, have to check the modality of the defined name.
+  unless (irr && er) $ do
+    dmod <- modalityOfConst d
+    unless (irr || usableRelevance dmod) $ do
+      reportSDoc "tc.meta.occurs" 35 $ hsep
+        [ "occursCheck: definition"
+        , prettyTCM d
+        , "has relevance"
+        , prettyTCM (getRelevance dmod)
+        ]
+      abort $ MetaIrrelevantSolution m $ Def d []
+    unless (er || usableQuantity dmod) $ do
+      reportSDoc "tc.meta.occurs" 35 $ hsep
+        [ "occursCheck: definition"
+        , prettyTCM d
+        , "has quantity"
+        , prettyTCM (getQuantity dmod)
+        ]
+      abort $ MetaErasedSolution m $ Def d []
+
 -- | Construct a test whether a de Bruijn index is allowed
 --   or needs to be pruned.
 allowedVars :: OccursM (Nat -> Bool)
@@ -196,9 +226,12 @@ defArgs m = asks (occUnfold . feExtra) >>= \case
   YesUnfold -> weakly m
 
 unfoldB :: (Instantiate t, Reduce t) => t -> OccursM (Blocked t)
-unfoldB v = asks (occUnfold . feExtra) >>= \case
-  NoUnfold  -> notBlocked <$> instantiate v
-  YesUnfold -> reduceB v
+unfoldB v = do
+  unfold <- asks $ occUnfold . feExtra
+  rel    <- asks feModality
+  case unfold of
+    YesUnfold | not (isIrrelevant rel) -> reduceB v
+    _                                  -> notBlocked <$> instantiate v
 
 unfold :: (Instantiate t, Reduce t) => t -> OccursM t
 unfold v = asks (occUnfold . feExtra) >>= \case
@@ -272,13 +305,22 @@ occursCheck m xs v = Bench.billTo [ Bench.Typing, Bench.OccursCheck ] $ do
         , feSingleton = variableCheck xs
         }
   initOccursCheck mv
-      -- TODO: Can we do this in a better way?
-  let redo m = m
-  -- First try without normalising the term
-  redo (occurs v `runReaderT` initEnv NoUnfold) `catchError` \ _ -> do
-    initOccursCheck mv
-    redo (occurs v `runReaderT` initEnv YesUnfold) `catchError` \ err -> case err of
-                            -- Produce nicer error messages
+  nicerErrorMessage $ do
+    -- First try without normalising the term
+    (occurs v `runReaderT` initEnv NoUnfold) `catchError` \err -> do
+      -- If first run is inconclusive, try again with normalization
+      -- (unless metavariable is irrelevant, in which case the
+      -- constraint will anyway be dropped)
+      case err of
+        PatternErr{} | not (isIrrelevant $ getMetaModality mv) -> do
+          initOccursCheck mv
+          occurs v `runReaderT` initEnv YesUnfold
+        _ -> throwError err
+
+  where
+    -- Produce nicer error messages
+    nicerErrorMessage :: TCM a -> TCM a
+    nicerErrorMessage f = f `catchError` \ err -> case err of
       TypeError _ cl -> case clValue cl of
         MetaOccursInItself{} ->
           typeError . GenericDocError =<<
@@ -305,14 +347,19 @@ occursCheck m xs v = Bench.billTo [ Bench.Typing, Bench.OccursCheck ] $ do
           typeError . GenericDocError =<<
             fsep [ text ("Cannot instantiate the metavariable " ++ prettyShow m ++ " to solution")
                  , prettyTCM v
-                 , "since (part of) the solution was created in an irrelevant context."
+                 , "since (part of) the solution was created in an irrelevant context"
+                 ]
+        MetaErasedSolution _ _ ->
+          typeError . GenericDocError =<<
+            fsep [ text ("Cannot instantiate the metavariable " ++ prettyShow m ++ " to solution")
+                 , prettyTCM v
+                 , "since (part of) the solution was created in an erased context"
                  ]
         _ -> throwError err
       _ -> throwError err
 
 instance Occurs Term where
   occurs v = do
-    m   <- asks (occMeta . feExtra)
     vb  <- unfoldB v
     -- occurs' ctx $ ignoreBlocking v  -- fails test/succeed/DontPruneBlocked
     let flexIfBlocked = case vb of
@@ -323,6 +370,7 @@ instance Occurs Term where
     v <- return $ ignoreBlocking vb
     flexIfBlocked $ do
         ctx <- ask
+        let m = occMeta . feExtra $ ctx
         reportSDoc "tc.meta.occurs" 45 $
           text ("occursCheck " ++ prettyShow m ++ " (" ++ show (feFlexRig ctx) ++ ") of ") <+> prettyTCM v
         reportSDoc "tc.meta.occurs" 70 $
@@ -350,16 +398,9 @@ instance Occurs Term where
           Level l     -> Level <$> occurs l
           Lit l       -> return v
           Dummy{}     -> return v
-          DontCare v  -> if isIrrelevant ctx then
-                           dontCare <$> occurs v
-                         else
-                           strongly $ abort $ MetaIrrelevantSolution m v
+          DontCare v  -> dontCare <$> do underRelevance Irrelevant $ occurs v
           Def d es    -> do
-            unlessM (isIrrelevant <$> ask) $ do
-              drel <- liftTCM $ relOfConst d
-              unless (usableRelevance drel) $ do
-                reportSDoc "tc.meta.occurs" 35 $ text ("relevance of definition: " ++ show drel)
-                abort $ MetaIrrelevantSolution m $ Def d []
+            definitionCheck d
             Def d <$> occDef d es
           Con c ci vs -> Con c ci <$> occurs vs  -- if strongly rigid, remain so
           Pi a b      -> uncurry Pi <$> occurs (a,b)
@@ -465,15 +506,14 @@ instance Occurs Clause where
   metaOccurs m = metaOccurs m . clauseBody
 
 instance Occurs Level where
-  occurs (Max as) = Max <$> occurs as
+  occurs (Max n as) = Max n <$> occurs as
 
-  metaOccurs m (Max as) = metaOccurs m as
+  metaOccurs m (Max _ as) = metaOccurs m as
 
 instance Occurs PlusLevel where
-  occurs l@ClosedLevel{} = return l
   occurs (Plus n l) = Plus n <$> occurs l
-  metaOccurs m ClosedLevel{} = return ()
-  metaOccurs m (Plus n l)    = metaOccurs m l
+
+  metaOccurs m (Plus n l) = metaOccurs m l
 
 instance Occurs LevelAtom where
   occurs l = do
@@ -503,15 +543,15 @@ instance Occurs Sort where
   occurs s = do
     unfold s >>= \case
       PiSort a s2 -> do
-        s1' <- weakly $ occurs $ getSort a
+        s1' <- flexibly $ occurs $ getSort a
         a'  <- (a $>) . El s1' <$> do flexibly $ occurs $ unEl $ unDom a
-        s2' <- mapAbstraction a' (weakly . occurs) s2
+        s2' <- mapAbstraction a' (flexibly . occurs) s2
         return $ PiSort a' s2'
       Type a     -> Type <$> occurs a
       Prop a     -> Prop <$> occurs a
       s@Inf      -> return s
       s@SizeUniv -> return s
-      UnivSort s -> UnivSort <$> do weakly $ occurs s
+      UnivSort s -> UnivSort <$> do flexibly $ occurs s
       MetaS x es -> do
         MetaV x es <- occurs (MetaV x es)
         return $ MetaS x es
@@ -534,15 +574,7 @@ instance Occurs Sort where
       DummyS{}   -> return ()
 
 instance Occurs a => Occurs (Elim' a) where
-  occurs e@(Proj _ f) = do
-    ctx <- ask
-    unless (isIrrelevant ctx) $ do
-      frel <- liftTCM $ relOfConst f
-      unless (usableRelevance frel) $ do
-        let m = occMeta $ feExtra ctx
-        reportSDoc "tc.meta.occurs" 35 $ text ("relevance of projection: " ++ show frel)
-        abort $ MetaIrrelevantSolution m $ Def f []
-    return e
+  occurs e@(Proj _ f)   = e <$ definitionCheck f
   occurs (Apply a)      = Apply  <$> occurs a
   occurs (IApply x y a) = IApply <$> occurs x <*> occurs y <*> occurs a
 
@@ -748,10 +780,9 @@ instance AnyRigid Sort where
       DummyS{}   -> return False
 
 instance AnyRigid Level where
-  anyRigid f (Max ls) = anyRigid f ls
+  anyRigid f (Max _ ls) = anyRigid f ls
 
 instance AnyRigid PlusLevel where
-  anyRigid f ClosedLevel{} = return False
   anyRigid f (Plus _ l)    = anyRigid f l
 
 instance AnyRigid LevelAtom where
@@ -814,7 +845,7 @@ killArgs kills m = do
       dbg kills' a a'
       -- If there is any prunable argument, perform the pruning
       if not (any unArg kills') then return PrunedNothing else do
-        performKill kills' m a'
+        addContext tel $ performKill kills' m a'
         -- Only successful if all occurrences were killed
         -- Andreas, 2011-05-09 more precisely, check that at least
         -- the in 'kills' prescribed kills were carried out
@@ -831,7 +862,7 @@ killArgs kills m = do
         , nest 2 $ vcat
           [ "metavar =" <+> prettyTCM m
           , "kills   =" <+> text (show kills)
-          , "kills'  =" <+> text (show kills')
+          , "kills'  =" <+> prettyList (map prettyTCM kills')
           , "oldType =" <+> prettyTCM a
           , "newType =" <+> prettyTCM a'
           ]
@@ -938,7 +969,7 @@ performKill kills m a = do
   let perm = Perm n
              [ i | (i, Arg _ False) <- zip [0..] kills ]
       judg = case mvJudgement mv of
-        HasType{} -> HasType __IMPOSSIBLE__ a
+        HasType{ jComparison = cmp } -> HasType __IMPOSSIBLE__ cmp a
         IsSort{}  -> IsSort  __IMPOSSIBLE__ a
   m' <- newMeta Instantiable (mvInfo mv) (mvPriority mv) perm judg
   -- Andreas, 2010-10-15 eta expand new meta variable if necessary

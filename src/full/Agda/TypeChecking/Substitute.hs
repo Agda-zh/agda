@@ -20,6 +20,7 @@ module Agda.TypeChecking.Substitute
   ) where
 
 import Control.Arrow (second)
+import Control.Monad (guard)
 import Data.Coerce
 import Data.Function
 import qualified Data.List as List
@@ -104,6 +105,8 @@ canProject f v =
   case v of
     (Con (ConHead _ _ fs) _ vs) -> do
       (fld, i) <- findWithIndex ((f==) . unArg) fs
+      -- Jesper, 2019-10-17: dont unfold irrelevant projections
+      guard $ not $ isIrrelevant fld
       -- Andreas, 2018-06-12, issue #2170
       -- The ArgInfo from the ConHead is more accurate (relevance subtyping!).
       setArgInfo (getArgInfo fld) <.> isApplyElim =<< listToMaybe (drop i vs)
@@ -812,10 +815,9 @@ instance (Coercible a Term, Subst t a) => Subst t (Sort' a) where
     where sub x = applySubst rho x
 
 instance Subst t a => Subst t (Level' a) where
-  applySubst rho (Max as) = Max $ applySubst rho as
+  applySubst rho (Max n as) = Max n $ applySubst rho as
 
 instance Subst t a => Subst t (PlusLevel' a) where
-  applySubst rho l@ClosedLevel{} = l
   applySubst rho (Plus n l) = Plus n $ applySubst rho l
 
 instance Subst t a => Subst t (LevelAtom' a) where
@@ -859,6 +861,7 @@ instance DeBruijn NLPat where
     PDef{}      -> Nothing
     PLam{}      -> Nothing
     PPi{}       -> Nothing
+    PSort{}     -> Nothing
     PBoundVar{} -> Nothing -- or... ?
     PTerm{}     -> Nothing -- or... ?
 
@@ -872,6 +875,7 @@ applyNLPatSubst = applySubst . fmap nlPatToTerm
       PDef f es      -> __IMPOSSIBLE__
       PLam i u       -> __IMPOSSIBLE__
       PPi a b        -> __IMPOSSIBLE__
+      PSort s        -> __IMPOSSIBLE__
       PBoundVar i es -> __IMPOSSIBLE__
 
 applyNLSubstToDom :: Subst NLPat a => Substitution' NLPat -> Dom a -> Dom a
@@ -883,6 +887,7 @@ instance Subst NLPat NLPat where
     PDef f es -> PDef f $ applySubst rho es
     PLam i u -> PLam i $ applySubst rho u
     PPi a b -> PPi (applyNLSubstToDom rho a) (applySubst rho b)
+    PSort s -> PSort $ applySubst rho s
     PBoundVar i es -> PBoundVar i $ applySubst rho es
     PTerm u -> PTerm $ applyNLPatSubst rho u
 
@@ -894,6 +899,7 @@ instance Subst NLPat NLPat where
         PDef f es      -> __IMPOSSIBLE__
         PLam i u       -> __IMPOSSIBLE__
         PPi a b        -> __IMPOSSIBLE__
+        PSort s        -> __IMPOSSIBLE__
         PBoundVar i es -> __IMPOSSIBLE__
 
 instance Subst NLPat NLPType where
@@ -951,6 +957,7 @@ instance Subst Term Constraint where
     HasBiggerSort s          -> HasBiggerSort (rf s)
     HasPTSRule a s           -> HasPTSRule (rf a) (rf s)
     UnquoteTactic m t h g    -> UnquoteTactic m (rf t) (rf h) (rf g)
+    CheckMetaInst m          -> CheckMetaInst m
     where
       rf x = applySubst rho x
 
@@ -980,14 +987,10 @@ instance (Subst t a, Subst t b) => Subst t (Dom' a b) where
   applySubst rho dom = setFreeVariables unknownFreeVariables $
     fmap (applySubst rho) dom{ domTactic = applySubst rho (domTactic dom) }
 
-instance Subst t a => Subst t (Maybe a) where
-  applySubst rho = fmap (applySubst rho)
-
-instance Subst t a => Subst t [a] where
-  applySubst rho = map (applySubst rho)
-
-instance (Ord k, Subst t a) => Subst t (Map k a) where
-  applySubst rho = fmap (applySubst rho)
+instance Subst t a          => Subst t (Maybe a)      where
+instance Subst t a          => Subst t [a]            where
+instance (Ord k, Subst t a) => Subst t (Map k a)      where
+instance Subst t a          => Subst t (WithHiding a) where
 
 instance Subst Term () where
   applySubst _ _ = ()
@@ -1015,8 +1018,8 @@ instance Subst Term EqualityView where
     (applySubst rho a)
     (applySubst rho b)
 
-instance DeBruijn DeBruijnPattern where
-  debruijnNamedVar n i             = varP $ DBPatVar n i
+instance DeBruijn a => DeBruijn (Pattern' a) where
+  debruijnNamedVar n i             = varP $ debruijnNamedVar n i
   -- deBruijnView returns Nothing, to prevent consS and the like
   -- from dropping the names and origins when building a substitution.
   deBruijnView _                   = Nothing
@@ -1078,15 +1081,18 @@ instance Subst Term Range where
 --
 --   This function is an optimization, saving us from construction lambdas we
 --   immediately remove through application.
-projDropParsApply :: Projection -> ProjOrigin -> Args -> Term
-projDropParsApply (Projection prop d r _ lams) o args =
+projDropParsApply :: Projection -> ProjOrigin -> Relevance -> Args -> Term
+projDropParsApply (Projection prop d r _ lams) o rel args =
   case initLast $ getProjLams lams of
     -- If we have no more abstractions, we must be a record field
     -- (projection applied already to record value).
     Nothing -> if proper then Def d $ map Apply args else __IMPOSSIBLE__
     Just (pars, Arg i y) ->
-      let core = if proper then Lam i $ Abs y $ Var 0 [Proj o d]
-                           else Lam i $ Abs y $ Def d [Apply $ Var 0 [] <$ r] -- Issue2226: get ArgInfo for principal argument from projFromType
+      let irr = isIrrelevant rel
+          core
+            | proper && not irr = Lam i $ Abs y $ Var 0 [Proj o d]
+            | otherwise         = Lam i $ Abs y $ Def d [Apply $ Var 0 [] <$ r]
+            -- Issue2226: get ArgInfo for principal argument from projFromType
       -- Now drop pars many args
           (pars', args') = dropCommon pars args
       -- We only have to abstract over the parameters that exceed the arguments.
@@ -1175,6 +1181,21 @@ telePi = telePi' reAbs
 telePi_ :: Telescope -> Type -> Type
 telePi_ = telePi' id
 
+-- | Only abstract the visible components of the telescope,
+--   and all that bind variables.  Everything will be an 'Abs'!
+-- Caution: quadratic time!
+
+telePiVisible :: Telescope -> Type -> Type
+telePiVisible EmptyTel t = t
+telePiVisible (ExtendTel u tel) t
+    -- If u is not declared visible and b can be strengthened, skip quantification of u.
+    | notVisible u, NoAbs x t' <- b' = t'
+    -- Otherwise, include quantification over u.
+    | otherwise = El (piSort u $ getSort <$> b) $ Pi u b
+  where
+    b  = tel <&> (`telePiVisible` t)
+    b' = reAbs b
+
 -- | Abstract over a telescope in a term, producing lambdas.
 --   Dumb abstraction: Always produces 'Abs', never 'NoAbs'.
 --
@@ -1240,11 +1261,8 @@ deriving instance Eq CompareAs
 deriving instance Eq Section
 
 instance Ord PlusLevel where
-  compare ClosedLevel{} Plus{}            = LT
-  compare Plus{} ClosedLevel{}            = GT
-  compare (ClosedLevel n) (ClosedLevel m) = compare n m
   -- Compare on the atom first. Makes most sense for levelMax.
-  compare (Plus n a) (Plus m b)           = compare (a,n) (b,m)
+  compare (Plus n a) (Plus m b) = compare (a,n) (b,m)
 
 instance Eq LevelAtom where
   (==) = (==) `on` unLevelAtom
@@ -1396,12 +1414,12 @@ funSort' :: Dom Type -> Sort -> Maybe Sort
 funSort' a b = case (getSort a, b) of
   (Inf           , _            ) -> Just Inf
   (_             , Inf          ) -> Just Inf
-  (Type (Max as) , Type (Max bs)) -> Just $ Type $ levelMax $ as ++ bs
+  (Type a , Type b) -> Just $ Type $ levelLub a b
   (SizeUniv      , b            ) -> Just b
   (_             , SizeUniv     ) -> Just SizeUniv
-  (Prop (Max as) , Type (Max bs)) -> Just $ Type $ levelMax $ as ++ bs
-  (Type (Max as) , Prop (Max bs)) -> Just $ Prop $ levelMax $ as ++ bs
-  (Prop (Max as) , Prop (Max bs)) -> Just $ Prop $ levelMax $ as ++ bs
+  (Prop a , Type b) -> Just $ Type $ levelLub a b
+  (Type a , Prop b) -> Just $ Prop $ levelLub a b
+  (Prop a , Prop b) -> Just $ Prop $ levelLub a b
   (a             , b            ) -> Nothing
 
 funSort :: Dom Type -> Sort -> Sort
@@ -1454,66 +1472,62 @@ piSort a b = fromMaybe (PiSort a b) $ piSort' a b
 -- * Level stuff
 ---------------------------------------------------------------------------
 
-levelMax :: [PlusLevel] -> Level
-levelMax as0 = Max $ ns ++ List.sort bs
+-- ^ Computes @n0 ⊔ a₁ ⊔ a₂ ⊔ ... ⊔ aₙ@ and return its canonical form.
+levelMax :: Integer -> [PlusLevel] -> Level
+levelMax n0 as0 = Max n as
   where
-    as = Prelude.concatMap expand as0
-    -- ns is empty or a singleton
-    ns = case [ n | ClosedLevel n <- as, n > 0 ] of
-      []  -> []
-      ns  -> [ ClosedLevel n | let n = Prelude.maximum ns, n > greatestB ]
-    bs = subsume [ b | b@Plus{} <- as ]
-    greatestB | null bs   = 0
-              | otherwise = Prelude.maximum [ n | Plus n _ <- bs ]
+    -- step 1: flatten nested @Level@ expressions in @LevelAtom@s
+    Max n1 as1 = expandLevel $ Max n0 as0
+    -- step 2: remove subsumed @PlusLevel@s
+    as2       = removeSubsumed as1
+    -- step 3: sort remaining @PlusLevel@s
+    as        = List.sort as2
+    -- step 4: set constant to 0 if it is subsumed by one of the @PlusLevel@s
+    greatestB = Prelude.maximum $ 0 : [ n | Plus n _ <- as ]
+    n | n1 > greatestB = n1
+      | otherwise      = 0
 
-    expand l@ClosedLevel{} = [l]
-    expand (Plus n l) = map (plus n) $ expand0 $ expandAtom l
+    lmax :: Integer -> [PlusLevel] -> [Level] -> Level
+    lmax m as []              = Max m as
+    lmax m as (Max n bs : ls) = lmax (max m n) (bs ++ as) ls
 
-    expand0 [] = [ClosedLevel 0]
-    expand0 as = as
+    expandLevel :: Level -> Level
+    expandLevel (Max m as) = lmax m [] $ map expandPlus as
 
+    expandPlus :: PlusLevel -> Level
+    expandPlus (Plus m l) = levelPlus m $ expandAtom l
+
+    expandAtom :: LevelAtom -> Level
     expandAtom l = case l of
       BlockedLevel _ v -> expandTm v
       NeutralLevel _ v -> expandTm v
       UnreducedLevel v -> expandTm v
-      MetaLevel{}      -> [Plus 0 l]
+      MetaLevel{}      -> Max 0 [Plus 0 l]
       where
-        expandTm v = case v of
-          Level (Max as)       -> as
-          Sort (Type (Max as)) -> as
-          _                    -> [Plus 0 l]
+        expandTm (Level l)       = expandLevel l
+        expandTm (Sort (Type l)) = expandLevel l -- TODO: get rid of this horrible hack!
+        expandTm v               = Max 0 [Plus 0 l]
 
-    plus n (ClosedLevel m) = ClosedLevel (n + m)
-    plus n (Plus m l)      = Plus (n + m) l
-
-    subsume (ClosedLevel{} : _) = __IMPOSSIBLE__
-    subsume [] = []
-    subsume (Plus n a : bs)
-      | not $ null ns = subsume bs
-      | otherwise     = Plus n a : subsume [ b | b@(Plus _ a') <- bs, a /= a' ]
+    removeSubsumed [] = []
+    removeSubsumed (Plus n a : bs)
+      | not $ null ns = removeSubsumed bs
+      | otherwise     = Plus n a : removeSubsumed [ b | b@(Plus _ a') <- bs, a /= a' ]
       where
-        ns = [ m | Plus m a'  <- bs, a == a', m > n ]
+        ns = [ m | Plus m a' <- bs, a == a', m > n ]
+
+-- | Given two levels @a@ and @b@, compute @a ⊔ b@ and return its
+--   canonical form.
+levelLub :: Level -> Level -> Level
+levelLub (Max m as) (Max n bs) = levelMax (max m n) $ as ++ bs
 
 levelTm :: Level -> Term
 levelTm l =
   case l of
-    Max [Plus 0 l] -> unLevelAtom l
-    _              -> Level l
+    Max 0 [Plus 0 l] -> unLevelAtom l
+    _                -> Level l
 
 unLevelAtom :: LevelAtom -> Term
 unLevelAtom (MetaLevel x es)   = MetaV x es
 unLevelAtom (NeutralLevel _ v) = v
 unLevelAtom (UnreducedLevel v) = v
 unLevelAtom (BlockedLevel _ v) = v
-
-levelSucView :: Level -> Maybe Level
-levelSucView (Max []) = Nothing
-levelSucView (Max as) = Max <$> traverse atomPred as
-  where
-    atomPred :: PlusLevel -> Maybe PlusLevel
-    atomPred (ClosedLevel n)
-      | n > 0     = Just $ ClosedLevel (n-1)
-      | otherwise = Nothing
-    atomPred (Plus n l)
-      | n > 0     = Just $ Plus (n-1) l
-      | otherwise = Nothing

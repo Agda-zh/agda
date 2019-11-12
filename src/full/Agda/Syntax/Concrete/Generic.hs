@@ -33,6 +33,9 @@ class ExprLike a where
 
 -- * Instances for things that do not contain expressions.
 
+instance ExprLike () where
+  mapExpr f = id
+
 instance ExprLike Name where
   mapExpr f = id
 
@@ -43,6 +46,11 @@ instance ExprLike Bool where
   mapExpr f = id
 
 -- * Instances for functors.
+
+instance ExprLike a => ExprLike (WithHiding a) where
+  mapExpr      = fmap     . mapExpr
+  traverseExpr = traverse . traverseExpr
+  foldExpr     = foldMap  . foldExpr
 
 instance ExprLike a => ExprLike (Named name a) where
   mapExpr      = fmap     . mapExpr
@@ -137,9 +145,7 @@ instance ExprLike Expr where
      As r x e           -> f $ As r x                 $ mapE e
      Dot r e            -> f $ Dot r                  $ mapE e
      ETel tel           -> f $ ETel                   $ mapE tel
-     QuoteGoal r x e    -> f $ QuoteGoal r x          $ mapE e
-     QuoteContext r     -> f $ e0
-     Tactic r e es      -> f $ Tactic r     (mapE e)  $ mapE es
+     Tactic r e         -> f $ Tactic r     (mapE e)
      Quote{}            -> f $ e0
      QuoteTerm{}        -> f $ e0
      Unquote{}          -> f $ e0
@@ -176,10 +182,10 @@ instance ExprLike LHS where
      LHS ps res wes -> LHS ps (mapE res) $ mapE wes
    where mapE e = mapExpr f e
 
-instance ExprLike e => ExprLike (RewriteEqn' p e) where
+instance (ExprLike qn, ExprLike e) => ExprLike (RewriteEqn' qn p e) where
   mapExpr f = \case
-    Rewrite es -> Rewrite (mapExpr f es)
-    Invert pes -> Invert (map (mapExpr f <$>) pes)
+    Rewrite es    -> Rewrite (mapExpr f es)
+    Invert qn pes -> Invert qn (map (mapExpr f <$>) pes)
 
 instance ExprLike LamClause where
   mapExpr f (LamClause lhs rhs wh ca) =

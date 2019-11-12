@@ -23,7 +23,7 @@
 
 * GHC:           https://www.haskell.org/ghc/
 
-  + Agda 已在 GHC 8.0.2、8.2.2、8.4.4 和 8.6.5 下通过测试。
+  + Agda 已在 GHC 8.0.2、8.2.2、8.4.4、8.6.5 和 8.8.1 下通过测试。
 
 * cabal-install: https://www.haskell.org/cabal/
 * Alex:          https://www.haskell.org/alex/
@@ -80,5 +80,4 @@ http://zlib.net 和 http://www.gnu.org/software/ncurses/）。
 .. A precompiled version of Emacs 24.3, with the necessary mathematical
 .. fonts, is available at http://homepage.cs.uiowa.edu/~astump/agda/ .
 
-带有必要数学字体的 Emacs 24.3 版本，可访问 http://homepage.cs.uiowa.edu/~astump/agda/
-获取。
+带有必要数学字体的 Emacs 26.1 版本，可访问 http://homepage.cs.uiowa.edu/~astump/agda/

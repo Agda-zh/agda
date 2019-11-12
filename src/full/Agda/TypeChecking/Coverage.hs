@@ -5,7 +5,7 @@
  -}
 
 module Agda.TypeChecking.Coverage
-  ( SplitClause(..), clauseToSplitClause, fixTarget
+  ( SplitClause(..), clauseToSplitClause, insertTrailingArgs
   , Covering(..), splitClauses
   , coverageCheck
   , isCovered
@@ -31,6 +31,7 @@ import Agda.Syntax.Common
 import Agda.Syntax.Position
 import Agda.Syntax.Internal
 import Agda.Syntax.Internal.Pattern
+import Agda.Syntax.Translation.InternalToAbstract (NamedClause(..))
 
 import Agda.TypeChecking.Names
 import Agda.TypeChecking.Primitive hiding (Nat)
@@ -101,9 +102,7 @@ data SplitClause = SClause
     -- clause for the purpose of inferring missing instance clauses.
   , scTarget :: Maybe (Arg Type)
     -- ^ The type of the rhs, living in context 'scTel'.
-    --   This invariant is broken before calls to 'fixTarget';
-    --   there, 'scTarget' lives in the old context.
-    --   'fixTarget' moves 'scTarget' to the new context by applying
+    --   'fixTargetType' computes the new 'scTarget' by applying
     --   substitution 'scSubst'.
   }
 
@@ -244,11 +243,10 @@ coverageCheck f t cs = do
       return False
 
   -- report a warning if there are uncovered cases,
-  -- generate a catch-all clause with a metavariable as its body to avoid
-  -- internal errors in the reduction machinery.
-  unless (null pss) $
-      setCurrentRange cs $
-        warning $ CoverageIssue f pss
+  unless (null pss) $ do
+    stLocalPartialDefs `modifyTCLens` Set.insert f
+    whenM ((YesCoverageCheck ==) <$> viewTC eCoverageCheck) $
+      setCurrentRange cs $ warning $ CoverageIssue f pss
 
   -- Andreas, 2017-08-28, issue #2723:
   -- Mark clauses as reachable or unreachable in the signature.
@@ -283,7 +281,17 @@ coverageCheck f t cs = do
 --   case splitter
 isCovered :: QName -> [Clause] -> SplitClause -> TCM Bool
 isCovered f cs sc = do
-  CoverResult { coverMissingClauses = missing } <- cover f cs sc
+  reportSDoc "tc.cover" 20 $ vcat
+    [ "isCovered"
+    , nest 2 $ vcat $
+      [ "f  = " <+> prettyTCM f
+      , "cs = " <+> vcat (map (nest 2 . prettyTCM . NamedClause f True) cs)
+      , "sc = " <+> prettyTCM sc
+      ]
+    ]
+  -- Jesper, 2019-10: introduce trailing arguments (see #3828)
+  (_ , sc') <- insertTrailingArgs sc
+  CoverResult { coverMissingClauses = missing } <- cover f cs sc'
   return $ null missing
 
 data CoverResult = CoverResult
@@ -325,7 +333,6 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
 
     No        ->  do
       reportSLn "tc.cover" 20 $ "pattern is not covered"
-      -- TODO Andrea: add hcomp clause!
       case fmap getHiding target of
         Just h | isInstance h -> do
           -- Ulf, 2016-10-31: For now we only infer instance clauses. It would
@@ -376,20 +383,45 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
           No{}    -> Nothing
 
     applyCl :: SplitClause -> Clause -> [(Nat, SplitPattern)] -> TCM Clause
-    applyCl SClause{scTel = tel, scCheckpoints = cps} cl mps = addContext tel $ do
+    applyCl SClause{scTel = tel, scPats = sps} cl mps = addContext tel $ do
+        let ps = namedClausePats cl
         reportSDoc "tc.cover.applyCl" 40 $ "applyCl"
         reportSDoc "tc.cover.applyCl" 40 $ "tel    =" <+> prettyTCM tel
-        reportSDoc "tc.cover.applyCl" 40 $ "ps     =" <+> pretty (namedClausePats cl)
+        reportSDoc "tc.cover.applyCl" 40 $ "ps     =" <+> pretty ps
         reportSDoc "tc.cover.applyCl" 40 $ "mps    =" <+> pretty mps
         reportSDoc "tc.cover.applyCl" 40 $ "s      =" <+> pretty s
-        reportSDoc "tc.cover.applyCl" 40 $ "new ps =" <+> pretty (s `applySubst` namedClausePats cl)
+        reportSDoc "tc.cover.applyCl" 40 $ "ps[s]  =" <+> pretty (s `applySubst` ps)
+
+        -- If a matching clause has fewer patterns than the split
+        -- clause we ought to copy over the extra ones.
+        -- e.g. if the user wrote:
+        --
+        --   bar : Bool -> Bool
+        --   bar false = false
+        --   bar = \ _ -> true
+        --
+        -- then for the second clause the @extra@ patterns will be @[true]@.
+
+        let extra = drop (length ps) $ fromSplitPatterns sps
+            n_extra = length extra
+
+        reportSDoc "tc.cover.applyCl" 40 $ "extra  =" <+> pretty extra
+
+        -- When we add the extra patterns we also update the type
+        -- and the body of the clause.
+
+        mtv <- (traverse . traverse) (telViewUpToPath n_extra) $ clauseType cl
+        let ty = (fmap . fmap) ((parallelS (reverse $ map namedArg extra) `composeS` liftS n_extra s `applyPatSubst`) . theCore) mtv
+
+        reportSDoc "tc.cover.applyCl" 40 $ "new ty =" <+> pretty ty
+
         return $
              Clause { clauseLHSRange  = clauseLHSRange cl
                     , clauseFullRange = clauseFullRange cl
                     , clauseTel       = tel
-                    , namedClausePats = s `applySubst` namedClausePats cl
-                    , clauseBody      = (s `applyPatSubst`) <$> clauseBody cl
-                    , clauseType      = (s `applyPatSubst`) <$> clauseType cl
+                    , namedClausePats = (s `applySubst` ps) ++ extra
+                    , clauseBody      = (`applyE` patternsToElims extra) . (s `applyPatSubst`) <$> clauseBody cl
+                    , clauseType      = ty
                     , clauseCatchall  = clauseCatchall cl
                     , clauseUnreachable = clauseUnreachable cl
                     }
@@ -474,7 +506,7 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
     trySplitRes (BlockedOnApply IsIApply) finalSplit splitError cont
        = do
          caseMaybeM (splitResultPath f sc) fallback $ \ sc ->
-               cover f cs . snd =<< fixTarget sc
+               cover f cs . snd =<< insertTrailingArgs sc
       where
         fallback | finalSplit = __IMPOSSIBLE__ -- already ruled out by lhs checker?
                  | otherwise  = cont
@@ -497,7 +529,7 @@ cover f cs sc@(SClause tel ps _ _ target) = updateRelevance $ do
         Right (Covering n scs) -> do
           -- If result splitting was successful, continue coverage checking.
           (projs, results) <- unzip <$> do
-            mapM (traverseF $ cover f cs <=< (snd <.> fixTarget)) scs
+            mapM (traverseF $ cover f cs <=< (snd <.> insertTrailingArgs)) scs
             -- OR:
             -- forM scs $ \ (proj, sc') -> (proj,) <$> do
             --   cover f cs =<< do
@@ -870,29 +902,32 @@ isDatatype ind at = do
         _ -> throw NotADatatype
     _ -> throw NotADatatype
 
--- | Update the target type, add more patterns to split clause
---   if target becomes a function type.
---   Returns the domains of the function type (if any).
-fixTarget :: SplitClause -> TCM (Telescope, SplitClause)
-fixTarget sc@SClause{ scTel = sctel, scPats = ps, scSubst = sigma, scCheckpoints = cps, scTarget = target } =
-  caseMaybe target (return (empty, sc)) $ \ a -> do
+-- | Update the target type of the split clause after a case split.
+fixTargetType :: SplitClause -> Arg Type -> TCM SplitClause
+fixTargetType sc@SClause{ scTel = sctel, scSubst = sigma } target = do
     reportSDoc "tc.cover.target" 20 $ sep
       [ "split clause telescope: " <+> prettyTCM sctel
-      , "old patterns          : " <+> do
-          addContext sctel $ prettyTCMPatternList $ fromSplitPatterns ps
       ]
     reportSDoc "tc.cover.target" 60 $ sep
       [ "substitution          : " <+> prettyTCM sigma
       ]
     reportSDoc "tc.cover.target" 30 $ sep
       [ "target type before substitution (variables may be wrong): " <+> do
-          addContext sctel $ prettyTCM a
+          addContext sctel $ prettyTCM target
       ]
-    (TelV tel b) <- telViewUpTo (-1) $ applySplitPSubst sigma $ unArg a
+    return $ sc { scTarget = Just $ applySplitPSubst sigma target }
+
+
+-- | Add more patterns to split clause if the target type is a function type.
+--   Returns the domains of the function type (if any).
+insertTrailingArgs :: SplitClause -> TCM (Telescope, SplitClause)
+insertTrailingArgs sc@SClause{ scTel = sctel, scPats = ps, scSubst = sigma, scCheckpoints = cps, scTarget = target } =
+  caseMaybe target (return (empty,sc)) $ \ a -> do
+    (TelV tel b) <- telViewUpTo (-1) $ unArg a
     reportSDoc "tc.cover.target" 15 $ sep
-      [ "target type telescope (after substitution): " <+> do
+      [ "target type telescope: " <+> do
           addContext sctel $ prettyTCM tel
-      , "target type core      (after substitution): " <+> do
+      , "target type core     : " <+> do
           addContext sctel $ addContext tel $ prettyTCM b
       ]
     let n         = size tel
@@ -1192,10 +1227,10 @@ computeNeighbourhood delta1 n delta2 d pars ixs hix tel ps cps c = do
           [ "ps'    =" <+> do prettyTCMPatternList $ fromSplitPatterns ps'
           ]
 
--- | Introduce trailing pattern variables via 'fixTarget'?
-data FixTarget
-  = YesFixTarget
-  | NoFixTarget
+-- | Introduce trailing pattern variables?
+data InsertTrailing
+  = DoInsertTrailing
+  | DontInsertTrailing
   deriving (Eq, Show)
 
 -- | Allow partial covering for split?
@@ -1207,7 +1242,7 @@ data AllowPartialCover
 -- | Entry point from @Interaction.MakeCase@.
 splitClauseWithAbsurd :: SplitClause -> Nat -> TCM (Either SplitError (Either SplitClause Covering))
 splitClauseWithAbsurd c x =
-  split' CheckEmpty Inductive NoAllowPartialCover NoFixTarget c (BlockingVar x [] [] True)
+  split' CheckEmpty Inductive NoAllowPartialCover DontInsertTrailing c (BlockingVar x [] [] True)
   -- Andreas, 2016-05-03, issue 1950:
   -- Do not introduce trailing pattern vars after split,
   -- because this does not work for with-clauses.
@@ -1240,7 +1275,7 @@ split :: Induction
       -> BlockingVar
       -> TCM (Either SplitError Covering)
 split ind allowPartialCover sc x =
-  fmap blendInAbsurdClause <$> split' NoCheckEmpty ind allowPartialCover YesFixTarget sc x
+  fmap blendInAbsurdClause <$> split' NoCheckEmpty ind allowPartialCover DoInsertTrailing sc x
   where
     n = lookupPatternVar sc $ blockingVarNo x
     blendInAbsurdClause :: Either SplitClause Covering -> Covering
@@ -1285,13 +1320,12 @@ split' :: CheckEmpty
           -- 'CoInductive'.
        -> AllowPartialCover
           -- ^ Don't fail if computed 'Covering' does not cover all constructors.
-       -> FixTarget
-          -- ^ If 'YesFixTarget', introduce new trailing variable patterns via
-          --   'fixTarget'.
+       -> InsertTrailing
+          -- ^ If 'DoInsertTrailing', introduce new trailing variable patterns.
        -> SplitClause
        -> BlockingVar
        -> TCM (Either SplitError (Either SplitClause Covering))
-split' checkEmpty ind allowPartialCover fixtarget
+split' checkEmpty ind allowPartialCover inserttrailing
        sc@(SClause tel ps _ cps target) (BlockingVar x pcons' plits overlap) =
  liftTCM $ runExceptT $ do
   debugInit tel x ps cps
@@ -1313,7 +1347,7 @@ split' checkEmpty ind allowPartialCover fixtarget
           NoCheckEmpty -> pure cons'
         mns  <- forM cons $ \ con -> fmap (SplitCon con,) <$>
           computeNeighbourhood delta1 n delta2 d pars ixs x tel ps cps con
-        hcompsc <- if isHIT && fixtarget == YesFixTarget
+        hcompsc <- if isHIT && inserttrailing == DoInsertTrailing
                    then computeHCompSplit delta1 n delta2 d pars ixs x tel ps cps
                    else return Nothing
         return $ (dr, catMaybes (mns ++ [hcompsc]))
@@ -1346,10 +1380,14 @@ split' checkEmpty ind allowPartialCover fixtarget
         then computeLitNeighborhoods
         else computeNeighborhoods
 
-  ns <- case fixtarget of
-    NoFixTarget  -> return ns
-    YesFixTarget -> lift $ forM ns $ \(con,sc) ->
-      (con,) . snd <$> fixTarget sc{ scTarget = target }
+  ns <- case target of
+    Just a  -> forM ns $ \(con,sc) -> lift $ (con,) <$> fixTargetType sc a
+    Nothing -> return ns
+
+  ns <- case inserttrailing of
+    DontInsertTrailing -> return ns
+    DoInsertTrailing   -> lift $ forM ns $ \(con,sc) ->
+      (con,) . snd <$> insertTrailingArgs sc
 
   -- Andreas, 2018-10-27, issue #3324; use isPropM.
   -- Need to reduce sort to decide on Prop.
@@ -1359,6 +1397,8 @@ split' checkEmpty ind allowPartialCover fixtarget
 
   mHCompName <- getPrimitiveName' builtinHComp
 
+  erased <- asksTC hasQuantity0
+  reportSLn "tc.cover.split" 60 $ "We are in erased context = " ++ show erased
   case ns of
     []  -> do
       let absurdp = VarP PatOAbsurd $ SplitPatVar underscore 0 []
@@ -1378,7 +1418,7 @@ split' checkEmpty ind allowPartialCover fixtarget
       throwError . IrrelevantDatatype =<< do liftTCM $ inContextOfT $ buildClosure (unDom t)
 
     -- Andreas, 2018-10-17: If more than one constructor matches, we cannot erase.
-    (_ : _ : _) | not (usableQuantity t) ->
+    (_ : _ : _) | not erased && not (usableQuantity t) ->
       throwError . ErasedDatatype =<< do liftTCM $ inContextOfT $ buildClosure (unDom t)
 
     _ -> do

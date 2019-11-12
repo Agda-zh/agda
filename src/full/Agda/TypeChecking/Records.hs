@@ -64,7 +64,7 @@ orderFields r fill axs fs = do
   where
     xs        = map unArg axs           -- official  fields (accord. record type)
     ys        = map fst fs              -- provided  fields
-    duplicate = ys List.\\ List.nub ys  -- duplicate fields
+    duplicate = duplicates ys           -- duplicate fields
     alien     = ys List.\\ xs           -- spurious  fields
     missing   = xs List.\\ ys           -- missing   fields
 
@@ -345,6 +345,12 @@ isEtaCon c = getConstInfo' c >>= \case
     Constructor {conData = r} -> isEtaRecord r
     _ -> return False
 
+-- | Going under one of these does not count as a decrease in size for the termination checker.
+isEtaOrCoinductiveRecordConstructor :: HasConstInfo m => QName -> m Bool
+isEtaOrCoinductiveRecordConstructor c =
+  caseMaybeM (isRecordConstructor c) (return False) $ \ (_, def) ->
+    return $ (Just Inductive, NoEta) /= (recInduction def, recEtaEquality def)
+
 -- | Check if a name refers to a record which is not coinductive.  (Projections are then size-preserving)
 isInductiveRecord :: QName -> TCM Bool
 isInductiveRecord r = maybe False (\ d -> recInduction d /= Just CoInductive) <$> isRecord r
@@ -573,11 +579,11 @@ etaExpandRecord' forceEta r pars u = do
   (tel, _, _, args) <- etaExpandRecord'_ forceEta r pars def u
   return (tel, args)
 
-etaExpandRecord_ :: (MonadTCEnv m, HasOptions m, MonadDebug m)
+etaExpandRecord_ :: HasConstInfo m
                  => QName -> Args -> Defn -> Term -> m (Telescope, ConHead, ConInfo, Args)
 etaExpandRecord_ = etaExpandRecord'_ False
 
-etaExpandRecord'_ :: (MonadTCEnv m, HasOptions m, MonadDebug m)
+etaExpandRecord'_ :: HasConstInfo m
                   => Bool -> QName -> Args -> Defn -> Term -> m (Telescope, ConHead, ConInfo, Args)
 etaExpandRecord'_ forceEta r pars def u = do
   let Record{ recConHead     = con
@@ -592,7 +598,9 @@ etaExpandRecord'_ forceEta r pars def u = do
     -- Already expanded.
     Con con_ ci es -> do
       let args = fromMaybe __IMPOSSIBLE__ $ allApplyElims es
-      when (con /= con_) $ do
+      -- Andreas, 2019-10-21, issue #4148
+      -- @con == con_@ might fail, but their normal forms should be equal.
+      whenNothingM (conName con `sameDef` conName con_) $ do
         reportSDoc "impossible" 10 $ vcat
           [ "etaExpandRecord_: the following two constructors should be identical"
           , nest 2 $ text $ "con  = " ++ prettyShow con
@@ -626,6 +634,11 @@ etaExpandAtRecordType t u = do
 --   We can eta contract if all fields @f = ...@ are irrelevant
 --   or all fields @f@ are the projection @f v@ of the same value @v@,
 --   but we need at least one relevant field to find the value @v@.
+--
+--   If all fields are erased, we cannot eta-contract.
+
+--   Andreas, 2019-11-06, issue #4168: eta-contraction all-erased record
+--   lead to compilation error.
 
 --   TODO: this can be moved out of TCM.
 --   Andreas, 2018-01-28: attempted just that, but Auto does not
@@ -635,7 +648,7 @@ etaExpandAtRecordType t u = do
 {-# SPECIALIZE etaContractRecord :: QName -> ConHead -> ConInfo -> Args -> TCM Term #-}
 {-# SPECIALIZE etaContractRecord :: QName -> ConHead -> ConInfo -> Args -> ReduceM Term #-}
 etaContractRecord :: HasConstInfo m => QName -> ConHead -> ConInfo -> Args -> m Term
-etaContractRecord r c ci args = do
+etaContractRecord r c ci args = if all (not . usableModality) args then fallBack else do
   Just Record{ recFields = xs } <- isRecord r
   let check :: Arg Term -> Arg QName -> Maybe (Maybe Term)
       check a ax = do
@@ -649,7 +662,6 @@ etaContractRecord r c ci args = do
           (_, Just (h, es)) | Proj _o f <- last es, unArg ax == f
                             -> Just $ Just $ h $ init es
           _                 -> Nothing
-      fallBack = return (mkCon c ci args)
   case compare (length args) (length xs) of
     LT -> fallBack       -- Not fully applied
     GT -> __IMPOSSIBLE__ -- Too many arguments. Impossible.
@@ -662,6 +674,8 @@ etaContractRecord r c ci args = do
               else fallBack
           _ -> fallBack -- just irrelevant terms
         _ -> fallBack  -- a Nothing
+  where
+  fallBack = return (mkCon c ci args)
 
 -- | Is the type a hereditarily singleton record type? May return a
 -- blocking metavariable.

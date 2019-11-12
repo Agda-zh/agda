@@ -3,6 +3,8 @@
 
 module Agda.TypeChecking.Serialise.Instances.Internal where
 
+import Control.Monad.IO.Class
+
 import Agda.Syntax.Internal as I
 import Agda.Syntax.Position as P
 
@@ -94,7 +96,9 @@ instance EmbPrj I.Term where
   icod_ (MetaV    a b) = __IMPOSSIBLE__
   icod_ (DontCare a  ) = icodeN 8 DontCare a
   icod_ (Level    a  ) = icodeN 9 Level a
-  icod_ (Dummy s _)    = __IMPOSSIBLE__
+  icod_ (Dummy s _)    = do
+    liftIO $ putStrLn $ "Dummy term in serialization: " ++ s
+    __IMPOSSIBLE__
 
   value = vcase valu where
     valu [a]       = valuN var   a
@@ -110,18 +114,14 @@ instance EmbPrj I.Term where
     valu _         = malformed
 
 instance EmbPrj Level where
-  icod_ (Max a) = icodeN' Max a
+  icod_ (Max a b) = icodeN' Max a b
 
   value = valueN Max
 
 instance EmbPrj PlusLevel where
-  icod_ (ClosedLevel a) = icodeN' ClosedLevel a
-  icod_ (Plus a b)      = icodeN' Plus a b
+  icod_ (Plus a b) = icodeN' Plus a b
 
-  value = vcase valu where
-    valu [a]    = valuN ClosedLevel a
-    valu [a, b] = valuN Plus a b
-    valu _      = malformed
+  value = valueN Plus
 
 instance EmbPrj LevelAtom where
   icod_ (NeutralLevel r a) = icodeN' (NeutralLevel r) a
@@ -145,7 +145,9 @@ instance EmbPrj I.Sort where
   icod_ (UnivSort a) = icodeN 5 UnivSort a
   icod_ (MetaS a b)  = __IMPOSSIBLE__
   icod_ (DefS a b)   = icodeN 6 DefS a b
-  icod_ (DummyS s)   = __IMPOSSIBLE__
+  icod_ (DummyS s)   = do
+    liftIO $ putStrLn $ "Dummy sort in serialization: " ++ s
+    __IMPOSSIBLE__
 
   value = vcase valu where
     valu [0, a]    = valuN Type  a
@@ -204,16 +206,18 @@ instance EmbPrj NLPat where
   icod_ (PDef a b)      = icodeN 1 PDef a b
   icod_ (PLam a b)      = icodeN 2 PLam a b
   icod_ (PPi a b)       = icodeN 3 PPi a b
-  icod_ (PBoundVar a b) = icodeN 4 PBoundVar a b
-  icod_ (PTerm a)       = icodeN 5 PTerm a
+  icod_ (PSort a)       = icodeN 4 PSort a
+  icod_ (PBoundVar a b) = icodeN 5 PBoundVar a b
+  icod_ (PTerm a)       = icodeN 6 PTerm a
 
   value = vcase valu where
     valu [0, a, b]    = valuN PVar a b
     valu [1, a, b]    = valuN PDef a b
     valu [2, a, b]    = valuN PLam a b
     valu [3, a, b]    = valuN PPi a b
-    valu [4, a, b]    = valuN PBoundVar a b
-    valu [5, a]       = valuN PTerm a
+    valu [4, a]       = valuN PSort a
+    valu [5, a, b]    = valuN PBoundVar a b
+    valu [6, a]       = valuN PTerm a
     valu _            = malformed
 
 instance EmbPrj NLPType where

@@ -21,6 +21,8 @@ import Control.Monad.Trans.Maybe
 import Data.Either (partitionEithers)
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
+import Data.IntSet (IntSet)
+import qualified Data.IntSet as IntSet
 import Data.List (findIndex)
 import qualified Data.List as List
 import Data.Monoid ( Monoid, mempty, mappend )
@@ -87,6 +89,7 @@ import Agda.Utils.Null
 import Agda.Utils.Pretty (prettyShow)
 import Agda.Utils.Singleton
 import Agda.Utils.Size
+import Agda.Utils.Tuple
 
 import Agda.Utils.Impossible
 --UNUSED Liang-Ting Chen 2019-07-16
@@ -558,10 +561,9 @@ checkPatternLinearity eqs = do
         ]
       case p of
         A.VarP x -> do
-          verboseS "tc.lhs.linear" 60 $ do
+          reportSLn "tc.lhs.linear" 60 $
             let y = A.unBind x
-            reportSLn "tc.lhs.linear" 60 $
-              "pattern variable " ++ show (A.nameConcrete y) ++ " with id " ++ show (A.nameId y)
+            in "pattern variable " ++ show (A.nameConcrete y) ++ " with id " ++ show (A.nameId y)
           case Map.lookup x vars of
             Just v -> do
               noConstraints $ equalTerm (unDom a) u v
@@ -617,7 +619,7 @@ bindAsPatterns (AsB x v a : asb) ret = do
 -- | Since with-abstraction can change the type of a variable, we have to
 --   recheck the stripped with patterns when checking a with function.
 recheckStrippedWithPattern :: ProblemEq -> TCM ()
-recheckStrippedWithPattern (ProblemEq p v a) = checkInternal v (unDom a)
+recheckStrippedWithPattern (ProblemEq p v a) = checkInternal v CmpLeq (unDom a)
   `catchError` \_ -> typeError . GenericDocError =<< vcat
     [ "Ill-typed pattern after with abstraction: " <+> prettyA p
     , "(perhaps you can replace it by `_`?)"
@@ -647,7 +649,7 @@ data LHSResult = LHSResult
     -- ^ As-bindings from the left-hand side. Return instead of bound since we
     -- want them in where's and right-hand sides, but not in with-clauses
     -- (Issue 2303).
-  , lhsPartialSplit :: [Int]
+  , lhsPartialSplit :: IntSet
     -- ^ have we done a partial split?
   }
 
@@ -780,7 +782,7 @@ checkLeftHandSide call f ps a withSub' strippedPats =
 
         let hasAbsurd = not . null $ absurds
 
-        let lhsResult = LHSResult (length cxt) delta qs hasAbsurd b patSub asb (catMaybes psplit)
+        let lhsResult = LHSResult (length cxt) delta qs hasAbsurd b patSub asb (IntSet.fromList $ catMaybes psplit)
 
         -- Debug output
         reportSDoc "tc.lhs.top" 10 $
@@ -1550,40 +1552,35 @@ disambiguateProjection h ambD@(AmbQ ds) b = do
         , text $ "and have fields       fs = " ++ prettyShow fs
         ]
       -- Try the projection candidates.
-      -- Note that tryProj wraps TCM in an ExceptT, collecting errors
-      -- instead of throwing them to the user immediately.
       -- First, we try to find a disambiguation that doesn't produce
       -- any new constraints.
-      disambiguations <- mapM (runExceptT . tryProj False fs r vs) ds
+      tryDisambiguate False fs r vs $ \ _ ->
+          -- If this fails, we try again with constraints, but we require
+          -- the solution to be unique.
+          tryDisambiguate True fs r vs $ \case
+            ([]   , []      ) -> __IMPOSSIBLE__
+            (err:_, []      ) -> throwError err
+            (_    , disambs@((d,a):_)) -> typeError . GenericDocError =<< vcat
+              [ "Ambiguous projection " <> prettyTCM d <> "."
+              , "It could refer to any of"
+              , nest 2 $ vcat $ map (prettyDisamb . fst) disambs
+              ]
+    _ -> __IMPOSSIBLE__
+
+  where
+    tryDisambiguate constraintsOk fs r vs failure = do
+      -- Note that tryProj wraps TCM in an ExceptT, collecting errors
+      -- instead of throwing them to the user immediately.
+      disambiguations <- mapM (runExceptT . tryProj constraintsOk fs r vs) ds
       case partitionEithers $ toList disambiguations of
-        (_ , (d,a):_) -> do
+        (_ , (d,a) : disambs) | constraintsOk <= null disambs -> do
           -- From here, we have the correctly disambiguated projection.
           -- For highlighting, we remember which name we disambiguated to.
           -- This is safe here (fingers crossed) as we won't decide on a
           -- different projection even if we backtrack and come here again.
           liftTCM $ storeDisambiguatedName d
           return (d,a)
-        (_ , []     ) -> do
-          -- If this fails, we try again with constraints, but we require
-          -- the solution to be unique.
-          disambiguations <- mapM (runExceptT . tryProj True fs r vs) ds
-          case partitionEithers $ toList disambiguations of
-            ([]   , []      ) -> __IMPOSSIBLE__
-            (err:_, []      ) -> throwError err
-            (errs , [(d,a)]) -> do
-              liftTCM $ storeDisambiguatedName d
-              return (d,a)
-            (errs , disambs@((d,a):_)) -> typeError . GenericDocError =<< vcat
-              [ "Ambiguous projection " <> prettyTCM d <> "."
-              , "It could refer to any of"
-              , nest 2 $ vcat $ map showDisamb disambs
-              ]
-    _ -> __IMPOSSIBLE__
-
-  where
-    showDisamb (d,_) =
-      let r = head $ filter (noRange /=) $ map nameBindingSite $ reverse $ mnameToList $ qnameModule d
-      in  (pretty =<< dropTopLevelModule d) <+> ("(introduced at " <> prettyTCM r <> ")")
+        other -> failure other
 
     notRecord = wrongProj $ headNe ds
 
@@ -1675,32 +1672,54 @@ disambiguateConstructor ambC@(AmbQ cs) d pars = do
     def@Record{}   -> return $ [conName $ recConHead def]
     _              -> __IMPOSSIBLE__
 
-  disambiguations <- mapM (runExceptT . tryCon False cons d pars) cs -- TODO: be more lazy
-  case partitionEithers $ toList disambiguations of
-    (_ , (c0,c,a):_) -> do
-      -- If constructor pattern was ambiguous,
-      -- remember our choice for highlighting info.
-      when (isAmbiguous ambC) $ liftTCM $ storeDisambiguatedName c0
-      return (c,a)
-    (_ , []     ) -> do
-      disambiguations <- mapM (runExceptT . tryCon True cons d pars) cs
-      case partitionEithers $ toList disambiguations of
+  -- First, try do disambiguate with noConstraints,
+  -- if that fails, try again allowing constraint generation.
+  tryDisambiguate False cons d $ \ _ ->
+    tryDisambiguate True cons d $ \case
         ([]   , []        ) -> __IMPOSSIBLE__
         (err:_, []        ) -> throwError err
-        (errs , [(c0,c,a)]) -> do
-          when (isAmbiguous ambC) $ liftTCM $ storeDisambiguatedName c0
-          return (c,a)
-
-        (errs , disambs@((c0,c,a):_)) -> typeError . GenericDocError =<< vcat
+        (_    , disambs@((_c0,c,_a):_)) -> typeError . GenericDocError =<< vcat
           [ "Ambiguous constructor " <> prettyTCM (qnameName $ conName c) <> "."
           , "It could refer to any of"
-          , nest 2 $ vcat $ map showDisamb disambs
+          , nest 2 $ vcat $ map (prettyDisamb . fst3) disambs
           ]
 
   where
-    showDisamb (c0,_,_) =
-      let r = head $ filter (noRange /=) $ map nameBindingSite $ reverse $ mnameToList $ qnameModule c0
-      in  (pretty =<< dropTopLevelModule c0) <+> ("(introduced at " <> prettyTCM r <> ")")
+    tryDisambiguate constraintsOk cons d failure = do
+      disambiguations <- mapM (runExceptT . tryCon constraintsOk cons d pars) cs
+        -- TODO: can we be more lazy, like using the ListT monad?
+      case partitionEithers $ toList disambiguations of
+        -- Andreas, 2019-10-14: The code from which I factored out 'tryDisambiguate'
+        -- did allow several disambiguations in case @constraintsOk == False@.
+        -- There was no comment explaining why, but "fixing" it and insisting on a
+        -- single disambiguation triggers this error in the std-lib
+        -- (version 4fca6541edbf5951cff5048b61235fe87d376d84):
+        --
+        --   Data/List/Relation/Unary/All/Properties.agda:462,15-17
+        --   Ambiguous constructor []₁.
+        --   It could refer to any of
+        --     _._.Pointwise.[] (introduced at Data/List/Relation/Binary/Pointwise.agda:40,6-15)
+        --     [] (introduced at Data/List/Relation/Binary/Pointwise.agda:40,6-15)
+        --   when checking that the pattern [] has type x ≋ y
+        --
+        -- There are problems with this error message (reported as issue #4130):
+        --
+        --   * the constructor [] is printed as []₁
+        --   * the two (identical) locations point to the definition of data type Pointwise
+        --     - not to the constructor []
+        --     - not offering a clue which imports generated the ambiguity
+        --
+        -- (These should be fixed at some point.)
+        -- It is not entirely clear to me that the ambiguity is safe to ignore,
+        -- but let's go with it for the sake of preserving the current behavior of Agda.
+        -- Thus, only when 'constraintsOk' we require 'null disambs':
+        -- (Note that in Haskell, boolean implication is '<=' rather than '=>'.)
+        (_, (c0,c,a) : disambs) | constraintsOk <= null disambs -> do
+          -- If constructor pattern was ambiguous,
+          -- remember our choice for highlighting info.
+          when (isAmbiguous ambC) $ liftTCM $ storeDisambiguatedName c0
+          return (c,a)
+        other -> failure other
 
     abstractConstructor c = softTypeError $
       AbstractConstructorNotInScope c
@@ -1719,7 +1738,7 @@ disambiguateConstructor ambC@(AmbQ cs) d pars = do
       Left (SigUnknown err) -> __IMPOSSIBLE__
       Left SigAbstract -> abstractConstructor c
       Right def -> do
-        let con = conSrcCon $ theDef def
+        let con = conSrcCon (theDef def) `withRangeOf` c
         unless (conName con `elem` cons) $ wrongDatatype c d
 
         -- Andreas, 2013-03-22 fixing issue 279
@@ -1742,7 +1761,11 @@ disambiguateConstructor ambC@(AmbQ cs) d pars = do
 
         return (c, con, cType)
 
-
+prettyDisamb :: QName -> TCM Doc
+prettyDisamb x = do
+  let d  = pretty =<< dropTopLevelModule x
+  let mr = lastMaybe $ filter (noRange /=) $ map nameBindingSite $ mnameToList $ qnameModule x
+  caseMaybe mr d $ \ r -> d <+> ("(introduced at " <> prettyTCM r <> ")")
 
 
 -- | @checkConstructorParameters c d pars@ checks that the data/record type
@@ -1777,7 +1800,8 @@ checkParameters dc d pars = liftTCM $ do
       compareArgs [] [] t (Def d []) vs (take (length vs) pars)
     _ -> __IMPOSSIBLE__
 
-checkSortOfSplitVar :: (MonadTCM m, MonadReduce m, MonadError TCErr m, ReadTCState m, LensSort a)
+checkSortOfSplitVar :: (MonadTCM m, MonadReduce m, MonadError TCErr m, ReadTCState m, MonadDebug m,
+                        LensSort a, PrettyTCM a)
                     => DataOrRecord -> a -> Maybe (Arg Type) -> m ()
 checkSortOfSplitVar dr a mtarget = do
   infOk <- optOmegaInOmega <$> pragmaOptions

@@ -61,6 +61,7 @@ import Agda.Syntax.Position
 import Agda.Syntax.Literal
 
 import Agda.TypeChecking.CompiledClause
+import Agda.TypeChecking.Irrelevance (isPropM)
 import Agda.TypeChecking.Monad hiding (Closure(..))
 import Agda.TypeChecking.Reduce as R
 import Agda.TypeChecking.Rewriting (rewrite)
@@ -73,6 +74,7 @@ import Agda.Utils.Float
 import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.Maybe
+import Agda.Utils.Monad
 import Agda.Utils.Null (empty)
 import Agda.Utils.Functor
 import Agda.Utils.Pretty
@@ -114,8 +116,17 @@ data BuiltinEnv = BuiltinEnv
 -- | Compute a 'CompactDef' from a regular definition.
 compactDef :: BuiltinEnv -> Definition -> RewriteRules -> ReduceM CompactDef
 compactDef bEnv def rewr = do
+
+  -- WARNING: don't use isPropM here because it relies on reduction,
+  -- which causes an infinite loop.
+  let isPrp = case getSort (defType def) of
+        Prop{} -> True
+        _      -> False
+  let irr = isPrp || isIrrelevant (defArgInfo def)
+
   cdefn <-
     case theDef def of
+      _ | irr -> pure CAxiom
       _ | Just (defName def) == bPrimForce bEnv   -> pure CForce
       _ | Just (defName def) == bPrimErase bEnv ->
           case telView' (defType def) of
@@ -773,6 +784,9 @@ reduceTm rEnv bEnv !constInfo normalisation ReductionFlags{..} =
   where
     -- Helpers to get information from the ReduceEnv.
     metaStore      = redSt rEnv ^. stMetaStore
+    -- Are we currently instance searching. In that case we don't fail hard on missing clauses. This
+    -- is a (very unsatisfactory) work-around for #3870.
+    speculative    = redSt rEnv ^. stConsideringInstance
     getMeta m      = maybe __IMPOSSIBLE__ mvInstantiation (IntMap.lookup (metaId m) metaStore)
     partialDefs    = runReduce getPartialDefs
     rewriteRules f = cdefRewriteRules (constInfo f)
@@ -869,16 +883,20 @@ reduceTm rEnv bEnv !constInfo normalisation ReductionFlags{..} =
           evalPointerAM (unArg v) [] (sucCtrl ctrl)
 
         -- Case: constructor. Perform beta reduction if projected from, otherwise return a value.
-        Con c i [] ->
-          evalIApplyAM spine ctrl $
-          case splitAt ar spine of
-            (args, Proj _ p : spine') -> evalPointerAM (unArg arg) spine' ctrl  -- Andreas #2170: fit argToDontCare here?!
-              where
-                fields    = map unArg $ conFields c
-                Just n    = List.elemIndex p fields
-                Apply arg = args !! n
-            _ -> rewriteAM (evalTrueValue (Con c' i []) env spine ctrl)
-          where CCon{cconSrcCon = c', cconArity = ar} = cdefDef (constInfo (conName c))
+        Con c i []
+          -- Constructors of types in Prop are not representex as
+          -- CCon, so this match might fail!
+          | CCon{cconSrcCon = c', cconArity = ar} <- cdefDef (constInfo (conName c)) ->
+            evalIApplyAM spine ctrl $
+            case splitAt ar spine of
+              (args, Proj _ p : spine')
+                  -> evalPointerAM (unArg arg) spine' ctrl  -- Andreas #2170: fit argToDontCare here?!
+                where
+                  fields    = map unArg $ conFields c
+                  Just n    = List.elemIndex p fields
+                  Apply arg = args !! n
+              _ -> rewriteAM (evalTrueValue (Con c' i []) env spine ctrl)
+          | otherwise -> runAM done
 
         -- Case: variable. Look up the variable in the environment and evaluate the resulting
         -- pointer. If the variable is not in the environment it's a free variable and we adjust the
@@ -907,6 +925,7 @@ reduceTm rEnv bEnv !constInfo normalisation ReductionFlags{..} =
         -- And we know the spine is empty since literals cannot be applied or projected.
         Lit{} -> runAM (evalTrueValue t emptyEnv [] ctrl)
         Pi{}  -> runAM done
+        DontCare{} -> runAM done
 
         -- Case: non-empty spine. If the focused term has a non-empty spine, we shift the
         -- eliminations onto the spine.
@@ -930,7 +949,6 @@ reduceTm rEnv bEnv !constInfo normalisation ReductionFlags{..} =
         -- to slowReduceTerm for these.
         Level{}    -> fallbackAM s
         Sort{}     -> fallbackAM s
-        DontCare{} -> fallbackAM s
         Dummy{}    -> fallbackAM s
 
       where done = Eval (mkValue (notBlocked ()) cl) ctrl
@@ -1259,7 +1277,7 @@ reduceTm rEnv bEnv !constInfo normalisation ReductionFlags{..} =
 
     -- Fall back to slow reduction. This happens if we encounter a definition that's not supported
     -- by the machine (like a primitive function that does not work on literals), or a term that is
-    -- not supported (Level, Sort, and DontCare at the moment). In this case we decode the current
+    -- not supported (Level and Sort at the moment). In this case we decode the current
     -- focus to a 'Term', call slow reduction and pack up the result in a value closure. If the top
     -- of the control stack is a 'NormaliseK' and the focus is a value closure (i.e. already in
     -- weak-head normal form) we call 'slowNormaliseArgs' and pop the 'NormaliseK' frame. Otherwise
@@ -1334,8 +1352,10 @@ reduceTm rEnv bEnv !constInfo normalisation ReductionFlags{..} =
     failedMatch :: QName -> MatchStack s -> ControlStack s -> ST s (Blocked Term)
     failedMatch f (CatchAll cc spine : stack :> cl) ctrl = runAM (Match f cc spine (stack :> cl) ctrl)
     failedMatch f ([] :> cl) ctrl
+        -- Bad work-around for #3870: don't fail hard during instance search.
+      | speculative          = rewriteAM (Eval (mkValue (NotBlocked MissingClauses ()) cl) ctrl)
       | f `elem` partialDefs = rewriteAM (Eval (mkValue (NotBlocked MissingClauses ()) cl) ctrl)
-      | otherwise          = runReduce $
+      | otherwise            = runReduce $
           traceSLn "impossible" 10 ("Incomplete pattern matching when applying " ++ show f)
                    __IMPOSSIBLE__
 

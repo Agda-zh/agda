@@ -89,15 +89,21 @@ import Agda.Utils.Impossible
 
 -- | Check that an expression is a type.
 isType :: A.Expr -> Sort -> TCM Type
-isType e s =
-    traceCall (IsTypeCall e s) $ do
-    v <- checkExpr e (sort s)
+isType = isType' CmpLeq
+
+-- | Check that an expression is a type.
+--   * If @c == CmpEq@, the given sort must be the minimal sort.
+--   * If @c == CmpLeq@, the given sort may be any bigger sort.
+isType' :: Comparison -> A.Expr -> Sort -> TCM Type
+isType' c e s =
+    traceCall (IsTypeCall c e s) $ do
+    v <- checkExpr' c e (sort s)
     return $ El s v
 
--- | Check that an expression is a type without knowing the sort.
+-- | Check that an expression is a type and infer its (minimal) sort.
 isType_ :: A.Expr -> TCM Type
 isType_ e = traceCall (IsType_ e) $ do
-  let fallback = isType e =<< do workOnTypes $ newSortMeta
+  let fallback = isType' CmpEq e =<< do workOnTypes $ newSortMeta
   case unScope e of
     A.Fun i (Arg info t) b -> do
       a <- setArgInfo info . defaultDom <$> isType_ t
@@ -589,7 +595,11 @@ insertHiddenLambdas h target postpone ret = do
 -- | @checkAbsurdLambda i h e t@ checks absurd lambda against type @t@.
 --   Precondition: @e = AbsurdLam i h@
 checkAbsurdLambda :: Comparison -> A.ExprInfo -> Hiding -> A.Expr -> Type -> TCM Term
-checkAbsurdLambda cmp i h e t = do
+checkAbsurdLambda cmp i h e t = localTC (set eQuantity topQuantity) $ do
+      -- Andreas, 2019-10-01: check absurd lambdas in non-erased mode.
+      -- Otherwise, they are not usable in meta-solutions in the term world.
+      -- See test/Succeed/Issue3176.agda for an absurd lambda
+      -- created in types.
   t <- instantiateFull t
   ifBlocked t (\ m t' -> postponeTypeCheckingProblem_ $ CheckExpr cmp e t') $ \ _ t' -> do
     case unEl t' of
@@ -642,7 +652,11 @@ checkAbsurdLambda cmp i h e t = do
 -- Precondition: @e = ExtendedLam i di qname cs@
 checkExtendedLambda :: Comparison -> A.ExprInfo -> A.DefInfo -> QName -> [A.Clause] ->
                        A.Expr -> Type -> TCM Term
-checkExtendedLambda cmp i di qname cs e t = do
+checkExtendedLambda cmp i di qname cs e t = localTC (set eQuantity topQuantity) $ do
+      -- Andreas, 2019-10-01: check extended lambdas in non-erased mode.
+      -- Otherwise, they are not usable in meta-solutions in the term world.
+      -- See test/Succeed/Issue{3581}.agda for an extended lambda
+      -- created in a type.
    -- Andreas, 2016-06-16 issue #2045
    -- Try to get rid of unsolved size metas before we
    -- fix the type of the extended lambda auxiliary function
@@ -917,9 +931,18 @@ checkRecordExpression cmp mfs e t = do
             ]
           postponeTypeCheckingProblem_ $ CheckExpr cmp e t
 
--- | @checkRecordUpdate ei recexpr fs e t@
--- Precondition @e = RecUpdate ei recexpr fs@.
-checkRecordUpdate :: Comparison -> A.ExprInfo -> A.Expr -> A.Assigns -> A.Expr -> Type -> TCM Term
+-- | @checkRecordUpdate cmp ei recexpr fs e t@
+--
+-- Preconditions: @e = RecUpdate ei recexpr fs@ and @t@ is reduced.
+--
+checkRecordUpdate
+  :: Comparison   -- ^ @cmp@
+  -> A.ExprInfo   -- ^ @ei@
+  -> A.Expr       -- ^ @recexpr@
+  -> A.Assigns    -- ^ @fs@
+  -> A.Expr       -- ^ @e = RecUpdate ei recexpr fs@
+  -> Type         -- ^ Reduced.
+  -> TCM Term
 checkRecordUpdate cmp ei recexpr fs e t = do
   case unEl t of
     Def r vs  -> do
@@ -978,30 +1001,43 @@ scopedExpr e                      = return e
 checkExpr :: A.Expr -> Type -> TCM Term
 checkExpr = checkExpr' CmpLeq
 
-checkExpr' :: Comparison -> A.Expr -> Type -> TCM Term
-checkExpr' cmp e t0 =
+-- Andreas, 2019-10-13, issue #4125:
+-- For the sake of readable types in interactive program construction,
+-- avoid unnecessary unfoldings via 'reduce' in the type checker!
+checkExpr'
+  :: Comparison
+  -> A.Expr
+  -> Type        -- ^ Unreduced!
+  -> TCM Term
+checkExpr' cmp e t =
   verboseBracket "tc.term.expr.top" 5 "checkExpr" $
-  traceCall (CheckExprCall cmp e t0) $ localScope $ doExpandLast $ unfoldInlined =<< do
+  traceCall (CheckExprCall cmp e t) $ localScope $ doExpandLast $ unfoldInlined =<< do
     reportSDoc "tc.term.expr.top" 15 $
         "Checking" <+> sep
-          [ fsep [ prettyTCM e, ":", prettyTCM t0 ]
+          [ fsep [ prettyTCM e, ":", prettyTCM t ]
           , nest 2 $ "at " <+> (text . prettyShow =<< getCurrentRange)
           ]
     reportSDoc "tc.term.expr.top.detailed" 80 $
-      "Checking" <+> fsep [ prettyTCM e, ":", text (show t0) ]
-    t <- reduce t0
+      "Checking" <+> fsep [ prettyTCM e, ":", text (show t) ]
+    tReduced <- reduce t
     reportSDoc "tc.term.expr.top" 15 $
-        "    --> " <+> prettyTCM t
+        "    --> " <+> prettyTCM tReduced
 
     e <- scopedExpr e
 
-    tryInsertHiddenLambda e t $ case e of
+    irrelevantIfProp <- isPropM t >>= \case
+      True  -> do
+        let mod = defaultModality { modRelevance = Irrelevant }
+        return $ fmap dontCare . applyModalityToContext mod
+      False -> return id
+
+    irrelevantIfProp $ tryInsertHiddenLambda e tReduced $ case e of
 
         A.ScopedExpr scope e -> __IMPOSSIBLE__ -- setScope scope >> checkExpr e t
 
         -- a meta variable without arguments: type check directly for efficiency
-        A.QuestionMark i ii -> checkQuestionMark (newValueMeta' RunMetaOccursCheck) t0 i ii
-        A.Underscore i -> checkUnderscore t0 i
+        A.QuestionMark i ii -> checkQuestionMark (newValueMeta' RunMetaOccursCheck) cmp t i ii
+        A.Underscore i -> checkUnderscore cmp t i
 
         A.WithApp _ e es -> typeError $ NotImplemented "type checking of with application"
 
@@ -1115,43 +1151,12 @@ checkExpr' cmp e t0 =
 
         A.Rec _ fs  -> checkRecordExpression cmp fs e t
 
-        A.RecUpdate ei recexpr fs -> checkRecordUpdate cmp ei recexpr fs e t
+        A.RecUpdate ei recexpr fs -> checkRecordUpdate cmp ei recexpr fs e tReduced
 
         A.DontCare e -> -- resurrect vars
           ifM ((Irrelevant ==) <$> asksTC getRelevance)
             (dontCare <$> do applyRelevanceToContext Irrelevant $ checkExpr' cmp e t)
             (internalError "DontCare may only appear in irrelevant contexts")
-
-        e0@(A.QuoteGoal _ x e) -> do
-          qg <- quoteGoal t
-          case qg of
-            Left metas -> postponeTypeCheckingProblem (CheckExpr cmp e0 t) $ andM $ map isInstantiatedMeta metas
-            Right quoted -> do
-              tmType <- agdaTermType
-              (v, ty) <- addLetBinding defaultArgInfo x quoted tmType (inferExpr e)
-              coerce cmp v ty t
-        e0@(A.QuoteContext _) -> do
-          qc <- quoteContext
-          case qc of
-            Left metas -> postponeTypeCheckingProblem (CheckExpr cmp e0 t) $ andM $ map isInstantiatedMeta metas
-            Right quotedContext -> do
-              ctxType <- el $ list $ primArg <@> (unEl <$> agdaTypeType)
-              coerce cmp quotedContext ctxType t
-        e0@(A.Tactic i e xs ys) -> do
-          qc <- quoteContext
-          qg <- quoteGoal t
-          let postpone metas = postponeTypeCheckingProblem (CheckExpr cmp e0 t) $ andM $ map isInstantiatedMeta metas
-          case (qc, qg) of
-            (Left metas1, Left metas2) -> postpone $ metas1 ++ metas2
-            (Left metas , Right _    ) -> postpone $ metas
-            (Right _    , Left metas ) -> postpone $ metas
-            (Right quotedCtx, Right quotedGoal) -> do
-              quotedCtx  <- defaultNamedArg <$> reify quotedCtx
-              quotedGoal <- defaultNamedArg <$> reify quotedGoal
-              let ai     = A.defaultAppInfo (getRange i)
-                  tac    = foldl (A.App ai) (A.App ai (A.App ai e quotedCtx) quotedGoal) xs
-                  result = foldl (A.App ai) (A.Unquote i) (defaultNamedArg tac : ys)
-              checkExpr' cmp result t
 
         A.ETel _   -> __IMPOSSIBLE__
 
@@ -1172,12 +1177,16 @@ checkExpr' cmp e t0 =
   where
   -- | Call checkExpr with an hidden lambda inserted if appropriate,
   --   else fallback.
-  tryInsertHiddenLambda :: A.Expr -> Type -> TCM Term -> TCM Term
-  tryInsertHiddenLambda e t fallback
+  tryInsertHiddenLambda
+    :: A.Expr
+    -> Type      -- ^ Reduced.
+    -> TCM Term
+    -> TCM Term
+  tryInsertHiddenLambda e tReduced fallback
     -- Insert hidden lambda if all of the following conditions are met:
     -- type is a hidden function type, {x : A} -> B or {{x : A}} -> B
-    -- expresion is not a lambda with the appropriate hiding yet
-    | Pi (Dom{domInfo = info, unDom = a}) b <- unEl t
+    -- expression is not a lambda with the appropriate hiding yet
+    | Pi (Dom{domInfo = info, unDom = a}) b <- unEl tReduced
         , let h = getHiding info
         , notVisible h
         -- expression is not a matching hidden lambda or question mark
@@ -1205,7 +1214,7 @@ checkExpr' cmp e t0 =
     doInsert info y = do
       x <- C.setNotInScope <$> freshName rx y
       reportSLn "tc.term.expr.impl" 15 $ "Inserting implicit lambda"
-      checkExpr' cmp (A.Lam (A.ExprRange re) (domainFree info $ A.mkBinder x) e) t
+      checkExpr' cmp (A.Lam (A.ExprRange re) (domainFree info $ A.mkBinder x) e) tReduced
 
     hiddenLambdaOrHole h e = case e of
       A.AbsurdLam _ h'        -> sameHiding h h'
@@ -1232,6 +1241,7 @@ checkExpr' cmp e t0 =
       A.ScopedExpr{} -> __IMPOSSIBLE__
       A.ETel{}       -> __IMPOSSIBLE__
       _ -> False
+
 ---------------------------------------------------------------------------
 -- * Reflection
 ---------------------------------------------------------------------------
@@ -1245,27 +1255,6 @@ doQuoteTerm cmp et t = do
       ty <- el primAgdaTerm
       coerce cmp q ty t
     metas -> postponeTypeCheckingProblem (DoQuoteTerm cmp et t) $ andM $ map isInstantiatedMeta metas
-
--- | Checking `quoteGoal` (deprecated)
-quoteGoal :: Type -> TCM (Either [MetaId] Term)
-quoteGoal t = do
-  t' <- etaContract =<< instantiateFull t
-  case allMetasList t' of
-    []  -> do
-      quotedGoal <- quoteTerm (unEl t')
-      return $ Right quotedGoal
-    metas -> return $ Left metas
-
--- | Checking `quoteContext` (deprecated)
-quoteContext :: TCM (Either [MetaId] Term)
-quoteContext = do
-  contextTypes  <- map (fmap snd) <$> getContext
-  contextTypes  <- etaContract =<< instantiateFull contextTypes
-  case allMetasList contextTypes of
-    []  -> do
-      quotedContext <- buildList <*> mapM quoteDom contextTypes
-      return $ Right quotedContext
-    metas -> return $ Left metas
 
 -- | Unquote a TCM computation in a given hole.
 unquoteM :: A.Expr -> Term -> Type -> TCM ()
@@ -1302,10 +1291,17 @@ unquoteTactic tac hole goal = do
 ---------------------------------------------------------------------------
 
 -- | Check an interaction point without arguments.
-checkQuestionMark :: (Type -> TCM (MetaId, Term)) -> Type -> A.MetaInfo -> InteractionId -> TCM Term
-checkQuestionMark new t0 i ii = do
+checkQuestionMark
+  :: (Comparison -> Type -> TCM (MetaId, Term))
+  -> Comparison
+  -> Type            -- ^ Not reduced!
+  -> A.MetaInfo
+  -> InteractionId
+  -> TCM Term
+checkQuestionMark new cmp t0 i ii = do
   reportSDoc "tc.interaction" 20 $ sep
     [ "Found interaction point"
+    , text . show =<< asksTC (^. lensIsAbstract)
     , pretty ii
     , ":"
     , prettyTCM t0
@@ -1314,32 +1310,36 @@ checkQuestionMark new t0 i ii = do
     [ "Raw:"
     , text (show t0)
     ]
-  checkMeta (newQuestionMark' new ii) t0 i -- Andreas, 2013-05-22 use unreduced type t0!
+  checkMeta (newQuestionMark' new ii) cmp t0 i -- Andreas, 2013-05-22 use unreduced type t0!
 
 -- | Check an underscore without arguments.
-checkUnderscore :: Type -> A.MetaInfo -> TCM Term
+checkUnderscore :: Comparison -> Type -> A.MetaInfo -> TCM Term
 checkUnderscore = checkMeta (newValueMeta RunMetaOccursCheck)
 
 -- | Type check a meta variable.
-checkMeta :: (Type -> TCM (MetaId, Term)) -> Type -> A.MetaInfo -> TCM Term
-checkMeta newMeta t i = fst <$> checkOrInferMeta newMeta (Just t) i
+checkMeta :: (Comparison -> Type -> TCM (MetaId, Term)) -> Comparison -> Type -> A.MetaInfo -> TCM Term
+checkMeta newMeta cmp t i = fst <$> checkOrInferMeta newMeta (Just (cmp , t)) i
 
 -- | Infer the type of a meta variable.
 --   If it is a new one, we create a new meta for its type.
-inferMeta :: (Type -> TCM (MetaId, Term)) -> A.MetaInfo -> TCM (Elims -> Term, Type)
+inferMeta :: (Comparison -> Type -> TCM (MetaId, Term)) -> A.MetaInfo -> TCM (Elims -> Term, Type)
 inferMeta newMeta i = mapFst applyE <$> checkOrInferMeta newMeta Nothing i
 
 -- | Type check a meta variable.
 --   If its type is not given, we return its type, or a fresh one, if it is a new meta.
 --   If its type is given, we check that the meta has this type, and we return the same
 --   type.
-checkOrInferMeta :: (Type -> TCM (MetaId, Term)) -> Maybe Type -> A.MetaInfo -> TCM (Term, Type)
+checkOrInferMeta
+  :: (Comparison -> Type -> TCM (MetaId, Term))
+  -> Maybe (Comparison , Type)
+  -> A.MetaInfo
+  -> TCM (Term, Type)
 checkOrInferMeta newMeta mt i = do
   case A.metaNumber i of
     Nothing -> do
       setScope (A.metaScope i)
-      t <- maybe (workOnTypes $ newTypeMeta_) return mt
-      (x, v) <- newMeta t
+      (cmp , t) <- maybe ((CmpEq,) <$> workOnTypes newTypeMeta_) return mt
+      (x, v) <- newMeta cmp t
       setMetaNameSuggestion x (A.metaNameSuggestion i)
       return (v, t)
     -- Rechecking an existing metavariable
@@ -1352,7 +1352,7 @@ checkOrInferMeta newMeta mt i = do
         nest 2 $ "of type " <+> prettyTCM t'
       case mt of
         Nothing -> return (v, t')
-        Just t  -> (,t) <$> coerce CmpLeq v t' t
+        Just (cmp , t) -> (,t) <$> coerce cmp v t' t
 
 -- | Turn a domain-free binding (e.g. lambda) into a domain-full one,
 --   by inserting an underscore for the missing type.
@@ -1429,8 +1429,8 @@ checkNamedArg arg@(Arg info e0) t0 = do
     reportSLn "tc.term.args.named" 75 $ "  arg = " ++ show (deepUnscope arg)
     -- Ulf, 2017-03-24: (#2172) Always treat explicit _ and ? as implicit
     -- argument (i.e. solve with unification).
-    let checkU = checkMeta (newMetaArg (setHiding Hidden info) x) t0
-    let checkQ = checkQuestionMark (newInteractionMetaArg (setHiding Hidden info) x) t0
+    let checkU = checkMeta (newMetaArg (setHiding Hidden info) x) CmpLeq t0
+    let checkQ = checkQuestionMark (newInteractionMetaArg (setHiding Hidden info) x) CmpLeq t0
     if not $ isHole e then checkExpr e t0 else localScope $ do
       -- Note: we need localScope here,
       -- as scopedExpr manipulates the scope in the state.

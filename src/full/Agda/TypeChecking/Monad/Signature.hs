@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns      #-}
 {-# LANGUAGE NondecreasingIndentation #-}
+{-# LANGUAGE TypeFamilies #-} -- for type equality ~
 
 module Agda.TypeChecking.Monad.Signature where
 
@@ -11,6 +12,7 @@ import Control.Monad.State
 import Control.Monad.Reader
 import Control.Monad.Writer
 import Control.Monad.Trans.Maybe
+import Control.Monad.Trans.Identity
 
 import qualified Data.List as List
 import Data.Set (Set)
@@ -61,6 +63,7 @@ import Agda.Utils.Monad
 import Agda.Utils.Null
 import Agda.Utils.Pretty
 import Agda.Utils.Size
+import Agda.Utils.Update
 
 import Agda.Utils.Impossible
 
@@ -305,8 +308,8 @@ applySection new ptel old ts ScopeCopyInfo{ renModules = rm, renNames = rd } = d
     -- and if a constructor is copied its datatype needs to be.
     closeConstructors :: Ren QName -> TCM (Ren QName)
     closeConstructors rd = do
-        ds <- List.nub . concat <$> mapM (constructorData . fst) rd
-        cs <- List.nub . concat <$> mapM (dataConstructors . fst) rd
+        ds <- List.nub . catMaybes <$> mapM (constructorData  . fst) rd
+        cs <- List.nub . concat    <$> mapM (dataConstructors . fst) rd
         new <- concat <$> mapM rename (ds ++ cs)
         reportSLn "tc.mod.apply.complete" 30 $
           "also copying: " ++ prettyShow new
@@ -319,17 +322,15 @@ applySection new ptel old ts ScopeCopyInfo{ renModules = rm, renNames = rd } = d
                           return [(x, qnameFromList [y])]
             Just{}  -> return []
 
-        constructorData :: QName -> TCM [QName]
+        constructorData :: QName -> TCM (Maybe QName)
         constructorData x = do
-          def <- theDef <$> getConstInfo x
-          return $ case def of
-            Constructor{ conData = d } -> [d]
-            _                          -> []
+          (theDef <$> getConstInfo x) <&> \case
+            Constructor{ conData = d } -> Just d
+            _                          -> Nothing
 
         dataConstructors :: QName -> TCM [QName]
         dataConstructors x = do
-          def <- theDef <$> getConstInfo x
-          return $ case def of
+          (theDef <$> getConstInfo x) <&> \case
             Datatype{ dataCons = cs } -> cs
             Record{ recConHead = h }  -> [conName h]
             _                         -> []
@@ -469,7 +470,7 @@ applySection' new ptel old ts ScopeCopyInfo{ renNames = rd, renModules = rm } = 
                          }
                 GeneralizableVar -> return GeneralizableVar
                 _ -> do
-                  (mst, cc) <- compileClauses Nothing [cl] -- Andreas, 2012-10-07 non need for record pattern translation
+                  (mst, _, cc) <- compileClauses Nothing [cl] -- Andreas, 2012-10-07 non need for record pattern translation
                   let newDef =
                         set funMacro  (oldDef ^. funMacro) $
                         set funStatic (oldDef ^. funStatic) $
@@ -492,7 +493,7 @@ applySection' new ptel old ts ScopeCopyInfo{ renNames = rd, renModules = rm } = 
                         , clauseTel       = EmptyTel
                         , namedClausePats = []
                         , clauseBody      = Just $ dropArgs pars $ case oldDef of
-                            Function{funProjection = Just p} -> projDropParsApply p ProjSystem ts'
+                            Function{funProjection = Just p} -> projDropParsApply p ProjSystem rel ts'
                             _ -> Def x $ map Apply ts'
                         , clauseType      = Just $ defaultArg t
                         , clauseCatchall  = False
@@ -502,6 +503,7 @@ applySection' new ptel old ts ScopeCopyInfo{ renNames = rd, renModules = rm } = 
                 -- The number of remaining parameters. We need to drop the
                 -- lambdas corresponding to these from the clause body above.
                 pars = max 0 $ maybe 0 (pred . projIndex) proj
+                rel  = getRelevance $ defArgInfo d
 
     {- Example
 
@@ -582,7 +584,7 @@ chaseDisplayForms q = go Set.empty [q]
 hasLoopingDisplayForm :: QName -> TCM Bool
 hasLoopingDisplayForm q = Set.member q <$> chaseDisplayForms q
 
-canonicalName :: QName -> TCM QName
+canonicalName :: HasConstInfo m => QName -> m QName
 canonicalName x = do
   def <- theDef <$> getConstInfo x
   case def of
@@ -595,7 +597,7 @@ canonicalName x = do
     extract (Def x _)  = x
     extract _          = __IMPOSSIBLE__
 
-sameDef :: QName -> QName -> TCM (Maybe QName)
+sameDef :: HasConstInfo m => QName -> QName -> m (Maybe QName)
 sameDef d1 d2 = do
   c1 <- canonicalName d1
   c2 <- canonicalName d2
@@ -662,10 +664,22 @@ class ( Functor m
 
   -- | Version that reports exceptions:
   getConstInfo' :: QName -> m (Either SigError Definition)
-  getConstInfo' q = Right <$> getConstInfo q
+  -- getConstInfo' q = Right <$> getConstInfo q -- conflicts with default signature
 
   -- | Lookup the rewrite rules with the given head symbol.
   getRewriteRulesFor :: QName -> m RewriteRules
+
+  -- Lifting HasConstInfo through monad transformers:
+
+  default getConstInfo'
+    :: (HasConstInfo n, MonadTrans t, m ~ t n)
+    => QName -> m (Either SigError Definition)
+  getConstInfo' = lift . getConstInfo'
+
+  default getRewriteRulesFor
+    :: (HasConstInfo n, MonadTrans t, m ~ t n)
+    => QName -> m RewriteRules
+  getRewriteRulesFor = lift . getRewriteRulesFor
 
 {-# SPECIALIZE getConstInfo :: QName -> TCM Definition #-}
 
@@ -691,7 +705,7 @@ instance HasConstInfo (TCMT IO) where
   getConstInfo q = getConstInfo' q >>= \case
       Right d -> return d
       Left (SigUnknown err) -> fail err
-      Left SigAbstract      -> notInScope $ qnameToConcrete q
+      Left SigAbstract      -> notInScopeError $ qnameToConcrete q
 
 defaultGetConstInfo
   :: (HasOptions m, MonadDebug m, MonadTCEnv m)
@@ -722,29 +736,17 @@ defaultGetConstInfo st env q = do
           dropLastModule q@QName{ qnameModule = m } =
             q{ qnameModule = mnameFromList $ ifNull (mnameToList m) __IMPOSSIBLE__ init }
 
-instance HasConstInfo m => HasConstInfo (ListT m) where
-  getConstInfo' = lift . getConstInfo'
-  getRewriteRulesFor = lift . getRewriteRulesFor
+-- HasConstInfo lifts through monad transformers
+-- (see default signatures in HasConstInfo class).
 
-instance HasConstInfo m => HasConstInfo (MaybeT m) where
-  getConstInfo' = lift . getConstInfo'
-  getRewriteRulesFor = lift . getRewriteRulesFor
-
-instance HasConstInfo m => HasConstInfo (ExceptT err m) where
-  getConstInfo' = lift . getConstInfo'
-  getRewriteRulesFor = lift . getRewriteRulesFor
-
-instance HasConstInfo m => HasConstInfo (ReaderT r m) where
-  getConstInfo' = lift . getConstInfo'
-  getRewriteRulesFor = lift . getRewriteRulesFor
-
-instance (Monoid w, HasConstInfo m) => HasConstInfo (WriterT w m) where
-  getConstInfo' = lift . getConstInfo'
-  getRewriteRulesFor = lift . getRewriteRulesFor
-
-instance HasConstInfo m => HasConstInfo (StateT s m) where
-  getConstInfo' = lift . getConstInfo'
-  getRewriteRulesFor = lift . getRewriteRulesFor
+instance HasConstInfo m => HasConstInfo (ChangeT m)
+instance HasConstInfo m => HasConstInfo (ExceptT err m)
+instance HasConstInfo m => HasConstInfo (IdentityT m)
+instance HasConstInfo m => HasConstInfo (ListT m)
+instance HasConstInfo m => HasConstInfo (MaybeT m)
+instance HasConstInfo m => HasConstInfo (ReaderT r m)
+instance HasConstInfo m => HasConstInfo (StateT s m)
+instance (Monoid w, HasConstInfo m) => HasConstInfo (WriterT w m)
 
 {-# INLINE getConInfo #-}
 getConInfo :: HasConstInfo m => ConHead -> m Definition
@@ -1079,7 +1081,7 @@ treatAbstractly' :: QName -> TCEnv -> Bool
 treatAbstractly' q env = case envAbstractMode env of
   ConcreteMode       -> True
   IgnoreAbstractMode -> False
-  AbstractMode       -> not $ current == m || current `isSubModuleOf` m
+  AbstractMode       -> not $ current `isLeChildModuleOf` m
   where
     current = dropAnon $ envCurrentModule env
     m       = dropAnon $ qnameModule q
@@ -1087,18 +1089,17 @@ treatAbstractly' q env = case envAbstractMode env of
 
 -- | Get type of a constant, instantiated to the current context.
 {-# SPECIALIZE typeOfConst :: QName -> TCM Type #-}
-typeOfConst
-  :: ( Functor m, HasConstInfo m, HasOptions m
-     , ReadTCState m, MonadTCEnv m, MonadDebug m )
-  => QName -> m Type
+typeOfConst :: (HasConstInfo m, ReadTCState m) => QName -> m Type
 typeOfConst q = defType <$> (instantiateDef =<< getConstInfo q)
 
 -- | Get relevance of a constant.
-relOfConst :: QName -> TCM Relevance
+{-# SPECIALIZE relOfConst :: QName -> TCM Relevance #-}
+relOfConst :: HasConstInfo m => QName -> m Relevance
 relOfConst q = getRelevance <$> getConstInfo q
 
 -- | Get modality of a constant.
-modalityOfConst :: QName -> TCM Modality
+{-# SPECIALIZE modalityOfConst :: QName -> TCM Modality #-}
+modalityOfConst :: HasConstInfo m => QName -> m Modality
 modalityOfConst q = getModality <$> getConstInfo q
 
 -- | The number of dropped parameters for a definition.

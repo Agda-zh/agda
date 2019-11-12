@@ -24,6 +24,7 @@ module Agda.Syntax.Parser.Parser (
     , splitOnDots  -- only used by the internal test-suite
     ) where
 
+import Control.Applicative ( (<|>) )
 import Control.Monad
 
 import Data.Bifunctor (first)
@@ -55,7 +56,6 @@ import Agda.Utils.Hash
 import Agda.Utils.List ( spanJust, chopWhen )
 import Agda.Utils.Monad
 import Agda.Utils.Pretty
-import Agda.Utils.Singleton
 import qualified Agda.Utils.Maybe.Strict as Strict
 
 import Agda.Utils.Impossible
@@ -128,8 +128,6 @@ import Agda.Utils.Impossible
     'Prop'                    { TokKeyword KwProp $$ }
     'public'                  { TokKeyword KwPublic $$ }
     'quote'                   { TokKeyword KwQuote $$ }
-    'quoteContext'            { TokKeyword KwQuoteContext $$ }
-    'quoteGoal'               { TokKeyword KwQuoteGoal $$ }
     'quoteTerm'               { TokKeyword KwQuoteTerm $$ }
     'record'                  { TokKeyword KwRecord $$ }
     'renaming'                { TokKeyword KwRenaming $$ }
@@ -161,6 +159,7 @@ import Agda.Utils.Impossible
     'NO_POSITIVITY_CHECK'     { TokKeyword KwNO_POSITIVITY_CHECK $$ }
     'NO_UNIVERSE_CHECK'       { TokKeyword KwNO_UNIVERSE_CHECK $$ }
     'NON_TERMINATING'         { TokKeyword KwNON_TERMINATING $$ }
+    'NON_COVERING'            { TokKeyword KwNON_COVERING $$ }
     'OPTIONS'                 { TokKeyword KwOPTIONS $$ }
     'POLARITY'                { TokKeyword KwPOLARITY $$ }
     'WARNING_ON_USAGE'        { TokKeyword KwWARNING_ON_USAGE $$ }
@@ -258,8 +257,6 @@ Token
     | 'Prop'                    { TokKeyword KwProp $1 }
     | 'public'                  { TokKeyword KwPublic $1 }
     | 'quote'                   { TokKeyword KwQuote $1 }
-    | 'quoteContext'            { TokKeyword KwQuoteContext $1 }
-    | 'quoteGoal'               { TokKeyword KwQuoteGoal $1 }
     | 'quoteTerm'               { TokKeyword KwQuoteTerm $1 }
     | 'record'                  { TokKeyword KwRecord $1 }
     | 'renaming'                { TokKeyword KwRenaming $1 }
@@ -291,6 +288,7 @@ Token
     | 'NO_POSITIVITY_CHECK'     { TokKeyword KwNO_POSITIVITY_CHECK $1 }
     | 'NO_UNIVERSE_CHECK'       { TokKeyword KwNO_UNIVERSE_CHECK $1 }
     | 'NON_TERMINATING'         { TokKeyword KwNON_TERMINATING $1 }
+    | 'NON_COVERING'            { TokKeyword KwNON_COVERING $1 }
     | 'OPTIONS'                 { TokKeyword KwOPTIONS $1 }
     | 'POLARITY'                { TokKeyword KwPOLARITY $1 }
     | 'REWRITE'                 { TokKeyword KwREWRITE $1 }
@@ -386,11 +384,12 @@ beginImpDir : {- empty -}   {% pushLexState imp_dir }
     Helper rules
  --------------------------------------------------------------------------}
 
--- An integer. Used in fixity declarations.
-Int :: { Integer }
-Int : literal   {% case $1 of {
-                     LitNat _ i -> return i;
-                     _          -> parseError $ "Expected integer"
+-- A float. Used in fixity declarations.
+Float :: { Ranged Double }
+Float : literal {% case $1 of
+                   { LitNat   r i -> return $ Ranged r $ fromInteger i
+                   ; LitFloat r i -> return $ Ranged r i
+                   ; _            -> parseError $ "Expected floating point number"
                    }
                 }
 
@@ -651,9 +650,7 @@ Expr2
     | 'let' Declarations LetBody   { Let (getRange ($1,$2,$3)) $2 $3 }
     | 'do' vopen DoStmts close     { DoBlock (getRange ($1, $3)) $3 }
     | Expr3                        { $1 }
-    | 'quoteGoal' Id 'in' Expr     { QuoteGoal (getRange ($1,$2,$3,$4)) $2 $4 }
-    | 'tactic' Application3               { Tactic (getRange ($1, $2)) (RawApp (getRange $2) $2) [] }
-    | 'tactic' Application3 '|' WithExprs { Tactic (getRange ($1, $2, $3, $4)) (RawApp (getRange $2) $2) $4 }
+    | 'tactic' Application3               { Tactic (getRange ($1, $2)) (RawApp (getRange $2) $2) }
 
 LetBody :: { Maybe Expr }
 LetBody : 'in' Expr   { Just $2 }
@@ -701,7 +698,6 @@ Expr3NoCurly
     | 'Set'                             { Set (getRange $1) }
     | 'quote'                           { Quote (getRange $1) }
     | 'quoteTerm'                       { QuoteTerm (getRange $1) }
-    | 'quoteContext'                    { QuoteContext (getRange $1) }
     | 'unquote'                         { Unquote (getRange $1) }
     | setN                              { SetN (getRange (fst $1)) (snd $1) }
     | propN                             { PropN (getRange (fst $1)) (snd $1) }
@@ -1039,7 +1035,7 @@ ImportDirectives
   | {- empty -}                       { [] }
 
 ImportDirective1 :: { ImportDirective }
-  : 'public'      { defaultImportDir { importDirRange = getRange $1, publicOpen = True } }
+  : 'public'      { defaultImportDir { importDirRange = getRange $1, publicOpen = Just (getRange $1) } }
   | Using         { defaultImportDir { importDirRange = snd $1, using    = fst $1 } }
   | Hiding        { defaultImportDir { importDirRange = snd $1, hiding   = fst $1 } }
   | RenamingDir   { defaultImportDir { importDirRange = snd $1, impRenaming = fst $1 } }
@@ -1067,7 +1063,14 @@ Renamings
 
 Renaming :: { Renaming }
 Renaming
-    : ImportName_ 'to' Id { Renaming $1 (setImportedName $1 $3) (getRange $2) }
+    : ImportName_ 'to' RenamingTarget { Renaming $1 (setImportedName $1 (snd $3)) (fst $3) (getRange $2) }
+
+RenamingTarget :: { (Maybe Fixity, Name) }
+RenamingTarget
+    : Id                 { (Nothing, $1) }
+    | 'infix'  Float Id  { (Just (Fixity (getRange ($1,$2)) (Related $ rangedThing $2) NonAssoc)  , $3) }
+    | 'infixl' Float Id  { (Just (Fixity (getRange ($1,$2)) (Related $ rangedThing $2) LeftAssoc) , $3) }
+    | 'infixr' Float Id  { (Just (Fixity (getRange ($1,$2)) (Related $ rangedThing $2) RightAssoc), $3) }
 
 -- We need a special imported name here, since we have to trigger
 -- the imp_dir state exactly one token before the 'to'
@@ -1101,7 +1104,7 @@ LHS :: { LHS }
 LHS : Expr1 WithRewriteExpressions
         {% exprToLHS $1      >>= \p ->
            buildWithBlock $2 >>= \ (rs, es) ->
-           return (p rs es)
+           return (p rs $ map observeHiding es)
         }
 
 WithRewriteExpressions :: { [Either RewriteEqn [Expr]] }
@@ -1110,7 +1113,7 @@ WithRewriteExpressions
   | 'with' Expr1 WithRewriteExpressions
     {% fmap (++ $3) (buildWithStmt $2)  }
   | 'rewrite' Expr1 WithRewriteExpressions
-    { Left (Rewrite $ fromWithApp $2) : $3 }
+    { Left (Rewrite $ fmap ((),) (fromWithApp $2)) : $3 }
 
 -- Parsing either an expression @e@ or a @(rewrite | with p <-) e1 | ... | en@.
 HoleContent :: { HoleContent }
@@ -1248,9 +1251,9 @@ RecordConstructorName :                  'constructor' Id        { ($2, NotInsta
 
 -- Fixity declarations.
 Infix :: { Declaration }
-Infix : 'infix'  Int SpaceBIds  { Infix (Fixity (getRange ($1,$3)) (Related $2) NonAssoc)   $3 }
-      | 'infixl' Int SpaceBIds  { Infix (Fixity (getRange ($1,$3)) (Related $2) LeftAssoc)  $3 }
-      | 'infixr' Int SpaceBIds  { Infix (Fixity (getRange ($1,$3)) (Related $2) RightAssoc) $3 }
+Infix : 'infix'  Float SpaceBIds  { Infix (Fixity (getRange ($1,$2,$3)) (Related $ rangedThing $2) NonAssoc)   $3 }
+      | 'infixl' Float SpaceBIds  { Infix (Fixity (getRange ($1,$2,$3)) (Related $ rangedThing $2) LeftAssoc)  $3 }
+      | 'infixr' Float SpaceBIds  { Infix (Fixity (getRange ($1,$2,$3)) (Related $ rangedThing $2) RightAssoc) $3 }
 
 -- Field declarations.
 Fields :: { Declaration }
@@ -1509,6 +1512,7 @@ DeclarationPragma
   | TerminatingPragma        { $1 }
   | NonTerminatingPragma     { $1 }
   | NoTerminationCheckPragma { $1 }
+  | NonCoveringPragma        { $1 }
   | WarningOnUsagePragma     { $1 }
   | WarningOnImportPragma    { $1 }
   | MeasurePragma            { $1 }
@@ -1594,6 +1598,11 @@ TerminatingPragma
   : '{-#' 'TERMINATING' '#-}'
     { TerminationCheckPragma (getRange ($1,$2,$3)) Terminating }
 
+NonCoveringPragma :: { Pragma }
+NonCoveringPragma
+  : '{-#' 'NON_COVERING' '#-}'
+    { NoCoverageCheckPragma (getRange ($1,$2,$3)) }
+
 MeasurePragma :: { Pragma }
 MeasurePragma
   : '{-#' 'MEASURE' PragmaName '#-}'
@@ -1605,9 +1614,10 @@ CatchallPragma
   : '{-#' 'CATCHALL' '#-}'
     { CatchallPragma (getRange ($1,$2,$3)) }
 
-
 ImpossiblePragma :: { Pragma }
-  : '{-#' 'IMPOSSIBLE' '#-}'  { ImpossiblePragma (getRange ($1,$2,$3)) }
+ImpossiblePragma
+  : '{-#' 'IMPOSSIBLE' '#-}'
+    { ImpossiblePragma (getRange ($1,$2,$3)) }
 
 NoPositivityCheckPragma :: { Pragma }
 NoPositivityCheckPragma
@@ -2072,7 +2082,7 @@ buildWithStmt :: Expr -> Parser [Either RewriteEqn [Expr]]
 buildWithStmt e = do
   es <- mapM buildSingleWithStmt $ fromWithApp e
   let ees = groupByEither es
-  pure $ map (mapLeft Invert) ees
+  pure $ map (mapLeft (Invert ())) ees
 
 buildSingleWithStmt :: Expr -> Parser (Either (Pattern, Expr) Expr)
 buildSingleWithStmt e = do
@@ -2115,7 +2125,7 @@ mergeImportDirectives is = do
         , using          = mappend (using i1) (using i2)
         , hiding         = hiding i1 ++ hiding i2
         , impRenaming    = impRenaming i1 ++ impRenaming i2
-        , publicOpen     = publicOpen i1 || publicOpen i2 }
+        , publicOpen     = publicOpen i1 <|> publicOpen i2 }
 
 -- | Check that an import directive doesn't contain repeated names
 verifyImportDirective :: ImportDirective -> Parser ImportDirective
@@ -2197,7 +2207,7 @@ validHaskellModuleName = all ok . splitOnDots
  --------------------------------------------------------------------------}
 
 -- | Turn an expression into a left hand side.
-exprToLHS :: Expr -> Parser ([RewriteEqn] -> [Expr] -> LHS)
+exprToLHS :: Expr -> Parser ([RewriteEqn] -> [WithHiding Expr] -> LHS)
 exprToLHS e = LHS <$> exprToPattern e
 
 -- | Turn an expression into a pattern. Fails if the expression is not a

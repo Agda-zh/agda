@@ -72,7 +72,7 @@ instance PrettyTCM Call where
       pwords "when checking that the expression"
       ++ [prettyA e] ++ pwords "has type" ++ [prettyTCM t]
 
-    IsTypeCall e s -> fsep $
+    IsTypeCall cmp e s -> fsep $
       pwords "when checking that the expression"
       ++ [prettyA e] ++ pwords "is a type of sort" ++ [prettyTCM s]
 

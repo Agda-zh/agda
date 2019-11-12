@@ -627,14 +627,18 @@ warningHighlighting w = case tcWarning w of
   UnsolvedMetaVariables rs   -> metasHighlighting rs
   AbsurdPatternRequiresNoRHS{} -> deadcodeHighlighting $ getRange w
   ModuleDoesntExport{}         -> deadcodeHighlighting $ getRange w
+  FixityInRenamingModule rs    -> Fold.foldMap deadcodeHighlighting rs
   -- expanded catch-all case to get a warning for new constructors
   CantGeneralizeOverSorts{}  -> mempty
   UnsolvedInteractionMetas{} -> mempty
   OldBuiltin{}               -> mempty
   EmptyRewritePragma{}       -> deadcodeHighlighting $ getRange w
   IllformedAsClause{}        -> deadcodeHighlighting $ getRange w
-  UselessPublic{}            -> mempty
+  UselessPublic{}            -> deadcodeHighlighting $ getRange w
   UselessInline{}            -> mempty
+  ClashesViaRenaming _ xs    -> Fold.foldMap (deadcodeHighlighting . getRange) xs
+    -- #4154, TODO: clashing renamings are not dead code, but introduce problems.
+    -- Should we have a different color?
   WrongInstanceDeclaration{} -> mempty
   InstanceWithExplicitArg{}  -> deadcodeHighlighting $ getRange w
   InstanceNoOutputTypeName{} -> mempty
@@ -648,6 +652,8 @@ warningHighlighting w = case tcWarning w of
   SafeFlagNonTerminating     -> mempty
   SafeFlagTerminating        -> mempty
   SafeFlagWithoutKFlagPrimEraseEquality -> mempty
+  SafeFlagInjective          -> mempty
+  SafeFlagNoCoverageCheck    -> mempty
   WithoutKFlagPrimEraseEquality -> mempty
   SafeFlagNoPositivityCheck  -> mempty
   SafeFlagPolarity           -> mempty
@@ -660,35 +666,40 @@ warningHighlighting w = case tcWarning w of
   RewriteNonConfluent{}      -> confluenceErrorHighlighting $ getRange w
   RewriteMaybeNonConfluent{} -> confluenceErrorHighlighting $ getRange w
   PragmaCompileErased{}      -> deadcodeHighlighting $ getRange w
+  NotInScopeW{}              -> deadcodeHighlighting $ getRange w
   NicifierIssue w           -> case w of
     -- we intentionally override the binding of `w` here so that our pattern of
     -- using `getRange w` still yields the most precise range information we
     -- can get.
-    NotAllowedInMutual{} -> deadcodeHighlighting $ getRange w
-    EmptyAbstract{}      -> deadcodeHighlighting $ getRange w
-    EmptyInstance{}      -> deadcodeHighlighting $ getRange w
-    EmptyMacro{}         -> deadcodeHighlighting $ getRange w
-    EmptyMutual{}        -> deadcodeHighlighting $ getRange w
-    EmptyPostulate{}     -> deadcodeHighlighting $ getRange w
-    EmptyPrivate{}       -> deadcodeHighlighting $ getRange w
-    EmptyGeneralize{}    -> deadcodeHighlighting $ getRange w
-    EmptyField{}         -> deadcodeHighlighting $ getRange w
-    UselessAbstract{}    -> deadcodeHighlighting $ getRange w
-    UselessInstance{}    -> deadcodeHighlighting $ getRange w
-    UselessPrivate{}     -> deadcodeHighlighting $ getRange w
+    NotAllowedInMutual{}             -> deadcodeHighlighting $ getRange w
+    EmptyAbstract{}                  -> deadcodeHighlighting $ getRange w
+    EmptyInstance{}                  -> deadcodeHighlighting $ getRange w
+    EmptyMacro{}                     -> deadcodeHighlighting $ getRange w
+    EmptyMutual{}                    -> deadcodeHighlighting $ getRange w
+    EmptyPostulate{}                 -> deadcodeHighlighting $ getRange w
+    EmptyPrimitive{}                 -> deadcodeHighlighting $ getRange w
+    EmptyPrivate{}                   -> deadcodeHighlighting $ getRange w
+    EmptyGeneralize{}                -> deadcodeHighlighting $ getRange w
+    EmptyField{}                     -> deadcodeHighlighting $ getRange w
+    UselessAbstract{}                -> deadcodeHighlighting $ getRange w
+    UselessInstance{}                -> deadcodeHighlighting $ getRange w
+    UselessPrivate{}                 -> deadcodeHighlighting $ getRange w
+    InvalidNoPositivityCheckPragma{} -> deadcodeHighlighting $ getRange w
+    InvalidNoUniverseCheckPragma{}   -> deadcodeHighlighting $ getRange w
+    InvalidTerminationCheckPragma{}  -> deadcodeHighlighting $ getRange w
+    InvalidCoverageCheckPragma{}     -> deadcodeHighlighting $ getRange w
+    OpenPublicAbstract{}             -> deadcodeHighlighting $ getRange w
+    OpenPublicPrivate{}              -> deadcodeHighlighting $ getRange w
+    ShadowingInTelescope nrs -> Fold.foldMap (shadowingTelHighlighting . snd) nrs
+    MissingDefinitions{}             -> missingDefinitionHighlighting $ getRange w
     -- TODO: explore highlighting opportunities here!
-    EmptyPrimitive{} -> mempty
-    InvalidCatchallPragma{} -> mempty
-    InvalidNoPositivityCheckPragma{} -> mempty
-    InvalidNoUniverseCheckPragma{} -> mempty
-    InvalidTerminationCheckPragma{} -> mempty
-    MissingDefinitions{} -> mempty
+    InvalidCatchallPragma{}           -> mempty
     PolarityPragmasButNotPostulates{} -> mempty
-    PragmaNoTerminationCheck{} -> mempty
-    PragmaCompiled{} -> mempty
-    UnknownFixityInMixfixDecl{} -> mempty
-    UnknownNamesInFixityDecl{} -> mempty
-    UnknownNamesInPolarityPragmas{} -> mempty
+    PragmaNoTerminationCheck{}        -> mempty
+    PragmaCompiled{}                  -> mempty
+    UnknownFixityInMixfixDecl{}       -> mempty
+    UnknownNamesInFixityDecl{}        -> mempty
+    UnknownNamesInPolarityPragmas{}   -> mempty
 
 
 -- | Generate syntax highlighting for termination errors.
@@ -721,6 +732,11 @@ coverageErrorHighlighting :: Range -> File
 coverageErrorHighlighting r = singleton (rToR $ P.continuousPerLine r) m
   where m = parserBased { otherAspects = Set.singleton CoverageProblem }
 
+shadowingTelHighlighting :: [Range] -> File
+shadowingTelHighlighting =
+  -- we do not want to highlight the one variable in scope as deadcode
+  -- so we take the @init@ segment of the ranges in question
+  Fold.foldMap deadcodeHighlighting . init
 
 catchallHighlighting :: Range -> File
 catchallHighlighting r = singleton (rToR $ P.continuousPerLine r) m
@@ -729,6 +745,10 @@ catchallHighlighting r = singleton (rToR $ P.continuousPerLine r) m
 confluenceErrorHighlighting :: Range -> File
 confluenceErrorHighlighting r = singleton (rToR $ P.continuousPerLine r) m
   where m = parserBased { otherAspects = Set.singleton ConfluenceProblem }
+
+missingDefinitionHighlighting :: Range -> File
+missingDefinitionHighlighting r = singleton (rToR $ P.continuousPerLine r) m
+  where m = parserBased { otherAspects = Set.singleton MissingDefinition }
 
 -- | Generates and prints syntax highlighting information for unsolved
 -- meta-variables and certain unsolved constraints.

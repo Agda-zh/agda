@@ -408,10 +408,8 @@ unfolding lemma for ``pred`` ::
     NotNull zero    = ⊥ -- false
     NotNull (suc n) = ⊤ -- trivially true
 
-    module _  {n} (pr : NotNull n) where
-
-      pred-correct : suc (pred n) ≡ n
-      pred-correct with suc p ← n = refl
+    pred-correct : ∀ n (pr : NotNull n) → suc (pred n) ≡ n
+    pred-correct n pr with suc p ← n = refl
 
 In the above code snippet we do not need to entertain the idea that ``n``
 could be equal to ``zero``: Agda detects that the proof ``pr`` allows us
@@ -428,10 +426,8 @@ of a vector whose length is neither 0 nor 1:
       []  : Vec A zero
       _∷_ : ∀ {n} → A → Vec A n → Vec A (suc n)
 
-    module _ {n} (pr : NotNull (pred n)) (vs : Vec A n) where
-
-      second : A
-      second with (_ ∷ v ∷ _) ← vs = v
+    second : ∀ {n} {pr : NotNull (pred n)} → Vec A n → A
+    second vs with (_ ∷ v ∷ _) ← vs = v
 
 Remember example of :ref:`simultaneous
 abstraction <simultaneous-abstraction>` from above. A simultaneous
@@ -445,24 +441,24 @@ of the vector argument using ``suc-+`` first.
 
 ::
 
-      suc-+ : ∀ m n → suc m + n ≡ m + suc n
-      suc-+ zero    n                   = refl
-      suc-+ (suc m) n rewrite suc-+ m n = refl
+    suc-+ : ∀ m n → suc m + n ≡ m + suc n
+    suc-+ zero    n                   = refl
+    suc-+ (suc m) n rewrite suc-+ m n = refl
 
-      infixr 1 _×_
-      _×_ : ∀ {a b} (A : Set a) (B : Set b) → Set ?
-      A × B = Σ A (λ _ → B)
+    infixr 1 _×_
+    _×_ : ∀ {a b} (A : Set a) (B : Set b) → Set ?
+    A × B = Σ A (λ _ → B)
 
-      splitAt : ∀ m {n} → Vec A (m + n) → Vec A m × Vec A n
-      splitAt zero    xs       = ([] , xs)
-      splitAt (suc m) (x ∷ xs) with (ys , zs) ← splitAt m xs = (x ∷ ys , zs)
+    splitAt : ∀ m {n} → Vec A (m + n) → Vec A m × Vec A n
+    splitAt zero    xs       = ([] , xs)
+    splitAt (suc m) (x ∷ xs) with (ys , zs) ← splitAt m xs = (x ∷ ys , zs)
 
-      -- focusAt m (x₀ ∷ ⋯ ∷ xₘ₋₁ ∷ xₘ ∷ xₘ₊₁ ∷ ⋯ ∷ xₘ₊ₙ)
-      -- returns ((x₀ ∷ ⋯ ∷ xₘ₋₁) , xₘ , (xₘ₊₁ ∷ ⋯ ∷ xₘ₊ₙ))
-      focusAt : ∀ m {n} → Vec A (suc (m + n)) → Vec A m × A × Vec A n
-      focusAt m {n} vs rewrite suc-+ m n
-                       with (before , focus ∷ after) ← splitAt m vs
-                       = (before , focus , after)
+    -- focusAt m (x₀ ∷ ⋯ ∷ xₘ₋₁ ∷ xₘ ∷ xₘ₊₁ ∷ ⋯ ∷ xₘ₊ₙ)
+    -- returns ((x₀ ∷ ⋯ ∷ xₘ₋₁) , xₘ , (xₘ₊₁ ∷ ⋯ ∷ xₘ₊ₙ))
+    focusAt : ∀ m {n} → Vec A (suc (m + n)) → Vec A m × A × Vec A n
+    focusAt m {n} vs rewrite suc-+ m n
+                     with (before , focus ∷ after) ← splitAt m vs
+                     = (before , focus , after)
 
 You can alternate arbitrarily many ``rewrite`` and pattern-matching
 ``with`` clauses and still perform a ``with`` abstraction afterwards
@@ -673,12 +669,11 @@ Helper functions
 ++++++++++++++++
 
 Internally with-abstractions are translated to auxiliary functions
-(see :ref:`technical-details` below) and you can
-always\ [#with-inlining]_ write these functions manually. The downside
-is that the type signature for the helper function needs to be written
-out explicitly, but fortunately the :ref:`emacs-mode` has a command
-(``C-c C-h``) to generate it using the same algorithm that generates
-the type of a with-function.
+(see :ref:`technical-details` below) and you can always write these
+functions manually. The downside is that the type signature for the
+helper function needs to be written out explicitly, but fortunately
+the :ref:`emacs-mode` has a command (``C-c C-h``) to generate it using
+the same algorithm that generates the type of a with-function.
 
 Performance considerations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -887,11 +882,6 @@ immediate problem (``fst p != w``) and the full type of the with-function. To
 get a more informative error, pointing to the location in the type where the
 error is, you can copy and paste the with-function type from the error message
 and try to type check it separately.
-
-
-.. [#with-inlining] The termination checker has :ref:`special treatment for
-                    with-functions <termination-checking-with>`, so replacing a `with` by the
-                    equivalent helper function might fail termination.
 
 .. [McBride2004] C. McBride and J. McKinna. **The view from the left**. Journal of Functional Programming, 2004.
                  http://strictlypositive.org/vfl.pdf.

@@ -41,8 +41,7 @@ import Agda.TypeChecking.Free
 import Agda.TypeChecking.Free.Reduce
 import Agda.TypeChecking.Irrelevance (workOnTypes)
 import Agda.TypeChecking.Level
-import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin (HasBuiltins(..), getBuiltin', builtinLevel)
+import Agda.TypeChecking.Monad hiding (constructorForm)
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Records
 import Agda.TypeChecking.Reduce
@@ -257,7 +256,10 @@ instance Match Type NLPat Term where
         case ok of
           Left b         -> block b
           Right Nothing  -> no ""
-          Right (Just v) -> tellSub r (i-n) t $ teleLam tel $ renameP __IMPOSSIBLE__ perm v
+          Right (Just v) ->
+            let t' = telePi  tel $ renameP __IMPOSSIBLE__ perm t
+                v' = teleLam tel $ renameP __IMPOSSIBLE__ perm v
+            in tellSub r (i-n) t' v'
       _ | MetaV m es <- v -> matchingBlocked $ Blocked m ()
 
       PDef f ps -> traceSDoc "rewriting.match" 60 ("matching a PDef: " <+> prettyTCM f) $ do
@@ -300,12 +302,16 @@ instance Match Type NLPat Term where
           let body = raise 1 v `apply` [Arg i (var 0)]
               k'   = ExtendTel a (Abs (absName b) k)
           match r gamma k' (absBody b) (absBody p') body
+        MetaV m es -> matchingBlocked $ Blocked m ()
         _ -> no ""
       PPi pa pb -> case v of
         Pi a b -> do
           match r gamma k () pa a
           let k' = ExtendTel a (Abs (absName b) k)
           match r gamma k' () (absBody pb) (absBody b)
+        _ -> no ""
+      PSort ps -> case v of
+        Sort s -> match r gamma k () ps s
         _ -> no ""
       PBoundVar i ps -> case v of
         Var i' es | i == i' -> do

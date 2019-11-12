@@ -19,6 +19,7 @@ module Agda.Syntax.Translation.InternalToAbstract
   , NamedClause(..)
   , reifyPatterns
   , reifyUnblocked
+  , blankNotInScope
   ) where
 
 import Prelude hiding (mapM_, mapM, null)
@@ -61,7 +62,7 @@ import Agda.TypeChecking.Free
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
 
-import Agda.Interaction.Options ( optPostfixProjections )
+import Agda.Interaction.Options
 
 import Agda.Utils.Either
 import Agda.Utils.Functor
@@ -158,6 +159,9 @@ class Reify i a | i -> a where
     --   This function serves to reify hidden/irrelevant things.
     reifyWhen :: MonadReify m => Bool -> i -> m a
     reifyWhen _ = reify
+
+instance Reify Bool Bool where
+    reify = return
 
 instance Reify Name Name where
     reify = return
@@ -535,7 +539,7 @@ reifyTerm expandAnonDefs0 v0 = do
           mv <- lookupMeta x
           (msub1,meta_tel,msub2) <- do
             local_chkpt <- viewTC eCurrentCheckpoint
-            (chkpt, tel, msub2) <- enterClosure (getMetaInfo mv) $ \ _ ->
+            (chkpt, tel, msub2) <- enterClosure mv $ \ _ ->
                                (,,) <$> viewTC eCurrentCheckpoint
                                     <*> getContextTelescope
                                     <*> viewTC (eCheckpoints . key local_chkpt)
@@ -576,7 +580,10 @@ reifyTerm expandAnonDefs0 v0 = do
 
           nelims x' simpl_named_es'
 
-    I.DontCare v -> A.DontCare <$> reifyTerm expandAnonDefs v
+    I.DontCare v -> do
+      showIrr <- optShowIrrelevant <$> pragmaOptions
+      if | showIrr   -> reifyTerm expandAnonDefs v
+         | otherwise -> return underscore
     I.Dummy s [] -> return $ A.Lit $ LitString noRange s
     I.Dummy "applyE" es | I.Apply (Arg _ h) : es' <- es -> do
                             h <- reify h
@@ -904,6 +911,14 @@ stripImplicits params ps = do
                                  = all (varOrDot . namedArg) ps
           varOrDot _             = False
 
+-- | @blankNotInScope e@ replaces variables in expression @e@ with @_@
+-- if they are currently not in scope.
+blankNotInScope :: (MonadTCEnv m, BlankVars a) => a -> m a
+blankNotInScope e = do
+  names <- Set.fromList . filter ((== C.InScope) . C.isInScope) <$> getContextNames
+  return $ blank names e
+
+
 -- | @blank bound e@ replaces all variables in expression @e@ that are not in @bound@ by
 --   an underscore @_@. It is used for printing dot patterns: we don't want to
 --   make implicit variables explicit, so we blank them out in the dot patterns
@@ -991,8 +1006,6 @@ instance BlankVars A.Expr where
     A.Rec i es             -> A.Rec i $ blank bound es
     A.RecUpdate i e es     -> uncurry (A.RecUpdate i) $ blank bound (e, es)
     A.ETel _               -> __IMPOSSIBLE__
-    A.QuoteGoal {}         -> __IMPOSSIBLE__
-    A.QuoteContext {}      -> __IMPOSSIBLE__
     A.Quote {}             -> __IMPOSSIBLE__
     A.QuoteTerm {}         -> __IMPOSSIBLE__
     A.Unquote {}           -> __IMPOSSIBLE__
@@ -1217,7 +1230,15 @@ instance Reify NamedClause A.Clause where
 instance Reify (QNamed System) [A.Clause] where
   reify (QNamed f (System tel sys)) = addContext tel $ do
     reportS "reify.system" 40 $ show tel : map show sys
+    view <- intervalView'
     unview <- intervalUnview'
+    sys <- flip filterM sys $ \ (phi,t) -> do
+      allM phi $ \ (u,b) -> do
+        u <- reduce u
+        return $ case (view u, b) of
+          (IZero, True) -> False
+          (IOne, False) -> False
+          _ -> True
     forM sys $ \ (alpha,u) -> do
       rhs <- RHS <$> reify u <*> pure Nothing
       ep <- fmap (A.EqualP patNoRange) . forM alpha $ \ (phi,b) -> do
@@ -1242,13 +1263,11 @@ instance Reify Sort Expr where
     reify s = do
       s <- instantiateFull s
       case s of
-        I.Type (I.Max [])                -> return $ A.Set noExprInfo 0
-        I.Type (I.Max [I.ClosedLevel n]) -> return $ A.Set noExprInfo n
+        I.Type (I.ClosedLevel n) -> return $ A.Set noExprInfo n
         I.Type a -> do
           a <- reify a
           return $ A.App defaultAppInfo_ (A.Set noExprInfo 0) (defaultNamedArg a)
-        I.Prop (I.Max [])                -> return $ A.Prop noExprInfo 0
-        I.Prop (I.Max [I.ClosedLevel n]) -> return $ A.Prop noExprInfo n
+        I.Prop (I.ClosedLevel n) -> return $ A.Prop noExprInfo n
         I.Prop a -> do
           a <- reify a
           return $ A.App defaultAppInfo_ (A.Prop noExprInfo 0) (defaultNamedArg a)
@@ -1288,7 +1307,7 @@ instance (Free i, Reify i a) => Reify (Abs i) (Name, a) where
     -- replaced by "z".
     s <- return $ if isUnderscore s && 0 `freeIn` v then "z" else s
 
-    x <- freshName_ s
+    x <- C.setNotInScope <$> freshName_ s
     e <- addContext x -- type doesn't matter
          $ reify v
     return (x,e)

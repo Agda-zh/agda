@@ -1,5 +1,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableInstances       #-}
+{-# LANGUAGE TypeFamilies               #-}
 
 -- | Computing the free variables of a term lazily.
 --
@@ -482,12 +483,16 @@ underConstructor (ConHead c i fs) =
   case (i,fs) of
     -- Coinductive (record) constructors admit infinite cycles:
     (CoInductive, _)   -> underFlexRig WeaklyRigid
-    -- Inductive data constructors do not admit infinite cycles:
-    (Inductive, [])    -> underFlexRig StronglyRigid
-    -- Inductive record constructors do not admit infinite cycles,
-    -- but this cannot be proven inside Agda.
-    -- Thus, unification should not prove it either.
-    (Inductive, (_:_)) -> id
+    -- Inductive constructors do not admit infinite cycles:
+    (Inductive, _)    -> underFlexRig StronglyRigid
+    -- Ulf, 2019-10-18: Now the termination checker treats inductive recursive records
+    -- the same as datatypes, so absense of infinite cycles can be proven in Agda, and thus
+    -- the unifier is allowed to do it too. Test case: test/Succeed/Issue1271a.agda
+    -- WAS:
+    -- -- Inductive record constructors do not admit infinite cycles,
+    -- -- but this cannot be proven inside Agda.
+    -- -- Thus, unification should not prove it either.
+    -- (Inductive, (_:_)) -> id
 
 ---------------------------------------------------------------------------
 -- * Recursively collecting free variables.
@@ -498,6 +503,10 @@ class Free t where
   -- {-# SPECIALIZE freeVars' :: a -> FreeM Any #-}
   -- So you cannot specialize all instances in one go. :(
   freeVars' :: IsVarSet a c => t -> FreeM a c
+
+  default freeVars' :: (t ~ f b, Foldable f, Free b) => IsVarSet a c => t -> FreeM a c
+  freeVars' = foldMap freeVars'
+
 
 instance Free Term where
   -- SPECIALIZE instance does not work as well, see
@@ -550,10 +559,9 @@ instance Free Sort where
       DummyS{}   -> mempty
 
 instance Free Level where
-  freeVars' (Max as) = freeVars' as
+  freeVars' (Max _ as) = freeVars' as
 
 instance Free PlusLevel where
-  freeVars' ClosedLevel{} = mempty
   freeVars' (Plus _ l)    = freeVars' l
 
 instance Free LevelAtom where
@@ -563,11 +571,9 @@ instance Free LevelAtom where
     BlockedLevel _ v -> freeVars' v
     UnreducedLevel v -> freeVars' v
 
-instance Free t => Free [t] where
-  freeVars' = foldMap freeVars'
-
-instance Free t => Free (Maybe t) where
-  freeVars' = foldMap freeVars'
+instance Free t => Free [t]            where
+instance Free t => Free (Maybe t)      where
+instance Free t => Free (WithHiding t) where
 
 instance (Free t, Free u) => Free (t, u) where
   freeVars' (t, u) = freeVars' t `mappend` freeVars' u

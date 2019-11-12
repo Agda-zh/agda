@@ -175,7 +175,7 @@ checkApplication cmp hd args e t = postponeInstanceConstraints $ do
     -- Subcase: unquote
     A.Unquote _
       | [arg] <- args -> do
-          (_, hole) <- newValueMeta RunMetaOccursCheck t
+          (_, hole) <- newValueMeta RunMetaOccursCheck CmpLeq t
           unquoteM (namedArg arg) hole t
           return hole
       | arg : args <- args -> do
@@ -191,7 +191,7 @@ checkApplication cmp hd args e t = postponeInstanceConstraints $ do
                                                     -- a b : (x : X) (y : Y x)
           let rho = reverse (map unArg vs) ++# IdS  -- [x := a, y := b]
           equalType (applySubst rho target) t       -- Z a b == A
-          (_, hole) <- newValueMeta RunMetaOccursCheck holeType
+          (_, hole) <- newValueMeta RunMetaOccursCheck CmpLeq holeType
           unquoteM (namedArg arg) hole holeType
           return $ apply hole vs
       where
@@ -239,10 +239,11 @@ inferApplication exh hd args e = postponeInstanceConstraints $
 inferHeadDef :: ProjOrigin -> QName -> TCM (Elims -> Term, Type)
 inferHeadDef o x = do
   proj <- isProjection x
+  rel  <- getRelevance . defArgInfo <$> getConstInfo x
   let app =
         case proj of
           Nothing -> \ args -> Def x $ map Apply args
-          Just p  -> \ args -> projDropParsApply p o args
+          Just p  -> \ args -> projDropParsApply p o rel args
   mapFst applyE <$> inferDef app x
 
 -- | Infer the type of a head thing (variable, function symbol, or constructor).
@@ -762,7 +763,8 @@ checkConstructorApplication cmp org t c args = do
     -- Issue 661: t maybe an evaluated form of d .., so we evaluate d
     -- as well and then check wether we deal with the same datatype
     t0 <- reduce (Def d [])
-    case (t0, unEl t) of -- Only fully applied constructors get special treatment
+    tReduced <- reduce t
+    case (t0, unEl tReduced) of -- Only fully applied constructors get special treatment
       (Def d0 _, Def d' es) -> do
         let ~(Just vs) = allApplyElims es
         reportSDoc "tc.term.con" 50 $ nest 2 $ "d0   =" <+> prettyTCM d0
@@ -1132,19 +1134,21 @@ checkSharpApplication e t c args = do
   -- postpone checking of patterns when we don't know their types (Issue480).
   forcedType <- do
     lvl <- levelType
-    (_, l) <- newValueMeta RunMetaOccursCheck lvl
+    (_, l) <- newValueMeta RunMetaOccursCheck CmpLeq lvl
     lv  <- levelView l
-    (_, a) <- newValueMeta RunMetaOccursCheck (sort $ Type lv)
+    (_, a) <- newValueMeta RunMetaOccursCheck CmpEq (sort $ Type lv)
     return $ El (Type lv) $ Def inf [Apply $ setHiding Hidden $ defaultArg l, Apply $ defaultArg a]
 
-  wrapper <- inFreshModuleIfFreeParams $ do
+  wrapper <- inFreshModuleIfFreeParams $ localTC (set eQuantity topQuantity) $ do
+    -- Andreas, 2019-10-12: create helper functions in non-erased mode.
+    -- Otherwise, they are not usable in meta-solutions in the term world.
     c' <- setRange (getRange c) <$>
             liftM2 qualify (killRange <$> currentModule)
                            (freshName_ name)
 
     -- Define and type check the fresh function.
     mod <- asksTC getModality
-    abs <- aModeToDef <$> asksTC envAbstractMode
+    abs <- asksTC (^. lensIsAbstract)
     let info   = A.mkDefInfo (A.nameConcrete $ A.qnameName c') noFixity'
                              PublicAccess abs noRange
         core   = A.LHSProj { A.lhsDestructor = unambiguous flat

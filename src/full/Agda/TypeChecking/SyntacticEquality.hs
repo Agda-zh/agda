@@ -93,21 +93,24 @@ instance SynEq Term where
       (Level l   , Level l'    )           -> levelTm <$$> synEq l l'
       (Sort  s   , Sort  s'    )           -> Sort    <$$> synEq s s'
       (Pi    a b , Pi    a' b' )           -> Pi      <$$> synEq a a' <**> synEq' b b'
-      (DontCare _, DontCare _  )           -> pure (v, v')
-         -- Irrelevant things are syntactically equal. ALT:
-         -- DontCare <$$> synEq v v'
+      (DontCare u, DontCare u' )           -> DontCare <$$> synEq u u'
+         -- Irrelevant things are not syntactically equal. ALT:
+         -- pure (u, u')
+         -- Jesper, 2019-10-21: considering irrelevant things to be
+         -- syntactically equal causes implicit arguments to go
+         -- unsolved, so it is better to go under the DontCare.
       (Dummy{}   , Dummy{}     )           -> pure (v, v')
       _                                    -> inequal (v, v')
 
 instance SynEq Level where
-  synEq (Max vs) (Max vs') = levelMax <$$> synEq vs vs'
+  synEq l@(Max n vs) l'@(Max n' vs')
+    | n == n'   = levelMax n <$$> synEq vs vs'
+    | otherwise = inequal (l, l')
 
 instance SynEq PlusLevel where
-  synEq l l' = do
-    case (l, l') of
-      (ClosedLevel v, ClosedLevel v') | v == v' -> pure2 l
-      (Plus n v,      Plus n' v')     | n == n' -> Plus n <$$> synEq v v'
-      _ -> inequal (l, l')
+  synEq l@(Plus n v) l'@(Plus n' v')
+    | n == n'   = Plus n <$$> synEq v v'
+    | otherwise = inequal (l, l')
 
 instance SynEq LevelAtom where
   synEq l l' = do

@@ -3,7 +3,7 @@
 module Agda.TypeChecking.InstanceArguments
   ( findInstance
   , isInstanceConstraint
-  , isConsideringInstance
+  , shouldPostponeInstanceSearch
   , postponeInstanceConstraints
   ) where
 
@@ -82,8 +82,7 @@ initialInstanceCandidates t = do
           vars = [ Candidate x t (isOverlappable info)
                  | (x, Dom{domInfo = info, unDom = (_, t)}) <- varsAndRaisedTypes
                  , isInstance info
-                 , usableRelevance info
-                 , usableQuantity info
+                 , usableModality info
                  ]
 
       -- {{}}-fields of variables are also candidates
@@ -105,8 +104,7 @@ initialInstanceCandidates t = do
       let lets = [ Candidate v t False
                  | (v, Dom{domInfo = info, unDom = t}) <- env
                  , isInstance info
-                 , usableRelevance info
-                 , usableQuantity info
+                 , usableModality info
                  ]
       return $ vars ++ fields ++ lets
 
@@ -161,9 +159,10 @@ initialInstanceCandidates t = do
           -- WAS: t <- defType <$> instantiateDef def
           args <- freeVarsToApply q
           let t = defType def `piApply` args
+              rel = getRelevance $ defArgInfo def
           let v = case theDef def of
                -- drop parameters if it's a projection function...
-               Function{ funProjection = Just p } -> projDropParsApply p ProjSystem args
+               Function{ funProjection = Just p } -> projDropParsApply p ProjSystem rel args
                -- Andreas, 2014-08-19: constructors cannot be declared as
                -- instances (at least as of now).
                -- I do not understand why the Constructor case is not impossible.
@@ -214,7 +213,7 @@ findInstance' :: MetaId -> [Candidate] -> TCM (Maybe ([Candidate], Maybe MetaId)
 findInstance' m cands = ifM (isFrozen m) (do
     reportSLn "tc.instance" 20 "Refusing to solve frozen instance meta."
     return (Just (cands, Nothing))) $ do
-  ifM isConsideringInstance (do
+  ifM shouldPostponeInstanceSearch (do
     reportSLn "tc.instance" 20 "Postponing possibly recursive instance search."
     return $ Just (cands, Nothing)) $ billTo [Benchmark.Typing, Benchmark.InstanceSearch] $ do
   -- Andreas, 2015-02-07: New metas should be created with range of the
@@ -511,17 +510,18 @@ isInstanceConstraint :: Constraint -> Bool
 isInstanceConstraint FindInstance{} = True
 isInstanceConstraint _              = False
 
-isConsideringInstance :: (ReadTCState m, HasOptions m) => m Bool
-isConsideringInstance =
+shouldPostponeInstanceSearch :: (ReadTCState m, HasOptions m) => m Bool
+shouldPostponeInstanceSearch =
   and2M ((^. stConsideringInstance) <$> getTCState)
         (not . optOverlappingInstances <$> pragmaOptions)
+  `or2M` ((^. stPostponeInstanceSearch) <$> getTCState)
 
 nowConsideringInstance :: (ReadTCState m) => m a -> m a
 nowConsideringInstance = locallyTCState stConsideringInstance $ const True
 
 wakeupInstanceConstraints :: TCM ()
 wakeupInstanceConstraints =
-  unlessM isConsideringInstance $ do
+  unlessM shouldPostponeInstanceSearch $ do
     wakeConstraints (return . isInstance)
     solveSomeAwakeConstraints isInstance False
   where
@@ -529,7 +529,7 @@ wakeupInstanceConstraints =
 
 postponeInstanceConstraints :: TCM a -> TCM a
 postponeInstanceConstraints m =
-  nowConsideringInstance m <* wakeupInstanceConstraints
+  locallyTCState stPostponeInstanceSearch (const True) m <* wakeupInstanceConstraints
 
 -- | To preserve the invariant that a constructor is not applied to its
 --   parameter arguments, we explicitly check whether function term
