@@ -36,15 +36,16 @@ import Agda.Utils.Impossible
 
 -- | If matching is inconclusive (@DontKnow@) we want to know whether
 --   it is due to a particular meta variable.
-data Match a = Yes Simplification (IntMap (Arg a))
+data Match a = Yes (IntMap (Arg a))
+  -- ^ Tesla, 2019-12-14, removed `Simplification`
              | No
              | DontKnow (Blocked ())
   deriving Functor
 
 instance Null (Match a) where
-  empty = Yes empty empty
-  null (Yes simpl as) = null simpl && null as
-  null _              = False
+  empty = Yes empty
+  null (Yes as) = null as
+  null _        = False
 
 matchedArgs :: Empty -> Int -> IntMap (Arg a) -> [Arg a]
 matchedArgs err n vs = map get [0..n-1]
@@ -67,7 +68,7 @@ instance Semigroup (Match a) where
     -- equivalence to case-trees (Issue 2964).
     No         <> _                = No
     _          <> No               = No
-    Yes s us   <> Yes s' vs        = Yes (s <> s') (us <> vs)
+    Yes us     <> Yes vs           = Yes $ us <> vs
 
 instance Monoid (Match a) where
     mempty = empty
@@ -112,7 +113,7 @@ foldMatch match = loop where
             -- Issue 2968: do not use vs' here, because it might
             -- contain ill-typed terms due to eta-expansion at wrong
             -- type.
-            return (r <> r', v' : vs)
+            return (r', v' : vs)
           DontKnow m -> return (DontKnow m, v' : vs)
           Yes{} -> do
             (r', vs') <- loop ps vs
@@ -162,8 +163,8 @@ matchCopattern :: DeBruijnPattern
 matchCopattern pat@ProjP{} elim@(Proj _ q) = do
   ProjP _ p <- normaliseProjP pat
   q         <- getOriginalProjection q
-  return $ if p == q then (Yes YesSimplification empty, elim)
-                     else (No,                          elim)
+  return $ if p == q then (Yes empty, elim)
+                     else (No,        elim)
 -- The following two cases are not impossible, see #2964
 matchCopattern ProjP{} elim@Apply{}   = return (No , elim)
 matchCopattern _       elim@Proj{}    = return (No , elim)
@@ -196,17 +197,17 @@ matchPattern :: DeBruijnPattern
              -> ReduceM (Match Term, Arg Term)
 matchPattern p u = case (p, u) of
   (ProjP{}, _            ) -> __IMPOSSIBLE__
-  (IApplyP _ _ _ x , arg ) -> return (Yes NoSimplification entry, arg)
+  (IApplyP _ _ _ x , arg ) -> return (Yes entry, arg)
     where entry = singleton (dbPatVarIndex x, arg)
-  (VarP _ x , arg          ) -> return (Yes NoSimplification entry, arg)
+  (VarP _ x , arg          ) -> return (Yes entry, arg)
     where entry = singleton (dbPatVarIndex x, arg)
-  (DotP _ _ , arg@(Arg _ v)) -> return (Yes NoSimplification empty, arg)
+  (DotP _ _ , arg@(Arg _ v)) -> return (Yes empty, arg)
   (LitP _ l , arg@(Arg _ v)) -> do
     w <- reduceB' v
     let arg' = arg $> ignoreBlocking w
     case w of
       NotBlocked _ (Lit l')
-          | l == l'            -> return (Yes YesSimplification empty , arg')
+          | l == l'            -> return (Yes empty , arg')
           | otherwise          -> return (No                          , arg')
       NotBlocked _ (MetaV x _) -> return (DontKnow $ Blocked x ()     , arg')
       Blocked x _              -> return (DontKnow $ Blocked x ()     , arg')
@@ -289,7 +290,7 @@ matchPattern p u = case (p, u) of
           b | Just t <- isMatchable b ->
             case mtc t of
               Just (bld, vs) -> do
-                (m, vs1) <- yesSimplification <$> matchPatterns ps (fromMaybe __IMPOSSIBLE__ $ allApplyElims vs)
+                (m, vs1) <- matchPatterns ps (fromMaybe __IMPOSSIBLE__ $ allApplyElims vs)
                 return (m, Arg info $ bld (mergeElims vs vs1))
               Nothing
                                     -> return (No                          , arg)
@@ -298,12 +299,13 @@ matchPattern p u = case (p, u) of
           NotBlocked r _            -> return (DontKnow $ NotBlocked r' () , arg)
             where r' = stuckOn (Apply arg) r
 
--- ASR (08 November 2014). The type of the function could be
---
--- @(Match Term, [Arg Term]) -> (Match Term, [Arg Term])@.
-yesSimplification :: (Match a, b) -> (Match a, b)
-yesSimplification (Yes _ vs, us) = (Yes YesSimplification vs, us)
-yesSimplification r              = r
+-- Tesla, 2019-12-14: not needed
+-- -- ASR (08 November 2014). The type of the function could be
+-- --
+-- -- @(Match Term, [Arg Term]) -> (Match Term, [Arg Term])@.
+-- yesSimplification :: (Match a, b) -> (Match a, b)
+-- yesSimplification (Yes _ vs, us) = (Yes YesSimplification vs, us)
+-- yesSimplification r              = r
 
 -- Matching patterns against patterns -------------------------------------
 
@@ -315,7 +317,7 @@ matchPatternP p (Arg info (DotP _ v)) = do
   (m, arg) <- matchPattern p (Arg info v)
   return $ fmap (DotP defaultPatternInfo) m
 matchPatternP p arg@(Arg info q) = do
-  let varMatch x = return $ Yes NoSimplification $ singleton (dbPatVarIndex x, arg)
+  let varMatch x = return . Yes $ singleton (dbPatVarIndex x, arg)
       termMatch  = do
         (m, arg) <- matchPattern p (fmap patternToTerm arg)
         return $ fmap (DotP defaultPatternInfo) m
@@ -323,7 +325,7 @@ matchPatternP p arg@(Arg info q) = do
     ProjP{}         -> __IMPOSSIBLE__
     IApplyP _ _ _ x -> varMatch x
     VarP _ x        -> varMatch x
-    DotP _ _        -> return $ Yes NoSimplification empty
+    DotP _ _        -> return $ Yes empty
     LitP{}          -> termMatch -- Literal patterns bind no variables so we can fall back to the Term version.
     DefP{}          -> termMatch
 

@@ -10,7 +10,7 @@ import Agda.TypeChecking.Substitute (DeBruijn)
 
 import Agda.Utils.Empty
 
-data Match a = Yes Simplification (IntMap (Arg a)) | No | DontKnow (Blocked ())
+data Match a = Yes (IntMap (Arg a)) | No | DontKnow (Blocked ())
 
 buildSubstitution :: (DeBruijn a) => Empty -> Int -> IntMap (Arg a) -> Substitution' a
 

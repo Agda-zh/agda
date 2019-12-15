@@ -959,7 +959,7 @@ unifyStep s (Injectivity k a d pars ixs c) = do
         (lhsMatch, _) <- liftTCM $ runReduceM $ Match.matchPatterns ps $ eqLHS s
         (rhsMatch, _) <- liftTCM $ runReduceM $ Match.matchPatterns ps $ eqRHS s
         case (lhsMatch, rhsMatch) of
-          (Match.Yes _ lhs', Match.Yes _ rhs') -> return
+          (Match.Yes lhs', Match.Yes rhs') -> return
             (reverse $ Match.matchedArgs __IMPOSSIBLE__ (size eqTel') lhs',
              reverse $ Match.matchedArgs __IMPOSSIBLE__ (size eqTel') rhs')
           _ -> __IMPOSSIBLE__
@@ -994,7 +994,7 @@ unifyStep s (Injectivity k a d pars ixs c) = do
         (lhsMatch, _) <- liftTCM $ runReduceM $ Match.matchPatterns ps $ eqLHS s
         (rhsMatch, _) <- liftTCM $ runReduceM $ Match.matchPatterns ps $ eqRHS s
         case (lhsMatch, rhsMatch) of
-          (Match.Yes _ lhs', Match.Yes _ rhs') -> return
+          (Match.Yes lhs', Match.Yes rhs') -> return
             (reverse $ Match.matchedArgs __IMPOSSIBLE__ (size eqTel') lhs',
              reverse $ Match.matchedArgs __IMPOSSIBLE__ (size eqTel') rhs')
           _ -> __IMPOSSIBLE__

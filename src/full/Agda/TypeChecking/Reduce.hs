@@ -744,13 +744,13 @@ appDefE' v cls rewr es = goCls cls $ map ignoreReduced es
             case m of
               No         -> goCls cls es
               DontKnow b -> rewrite b v rewr es
-              Yes simpl vs -- vs is the subst. for the variables bound in body
+              Yes vs -- vs is the subst. for the variables bound in body
                 | Just w <- body -> do -- clause has body?
                     -- TODO: let matchPatterns also return the reduced forms
                     -- of the original arguments!
                     -- Andreas, 2013-05-19 isn't this done now?
                     let sigma = buildSubstitution __IMPOSSIBLE__ nvars vs
-                    return $ YesReduction simpl $ applySubst sigma w `applyE` es1
+                    redReturn $ applySubst sigma w `applyE` es1
                 | otherwise     -> rewrite (NotBlocked AbsurdMatch ()) v rewr es
 
 instance Reduce a => Reduce (Closure a) where
