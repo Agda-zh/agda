@@ -25,6 +25,8 @@ import Data.Int
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
 import qualified Data.List as List
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map -- hiding (singleton, null, empty)
@@ -99,7 +101,6 @@ import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.ListT
 import Agda.Utils.Monad
-import Agda.Utils.NonemptyList
 import Agda.Utils.Null
 import Agda.Utils.Permutation
 import Agda.Utils.Pretty
@@ -1016,7 +1017,6 @@ data Constraint
   = ValueCmp Comparison CompareAs Term Term
   | ValueCmpOnFace Comparison Term Type Term Term
   | ElimCmp [Polarity] [IsForced] Type Term [Elim] [Elim]
-  | TypeCmp Comparison Type Type
   | TelCmp Type Type Comparison Telescope Telescope -- ^ the two types are for the error message only
   | SortCmp Comparison Sort Sort
   | LevelCmp Comparison Level Level
@@ -1036,7 +1036,7 @@ data Constraint
     --   on which the constraint may be blocked on and the third one is the list
     --   of candidates (or Nothing if we haven’t determined the list of
     --   candidates yet)
-  | CheckFunDef Delayed Info.DefInfo QName [A.Clause]
+  | CheckFunDef Delayed A.DefInfo QName [A.Clause]
   | UnquoteTactic (Maybe MetaId) Term Term Type   -- ^ First argument is computation and the others are hole and goal type
   deriving (Data, Show)
 
@@ -1046,7 +1046,6 @@ instance HasRange Constraint where
 {- no Range instances for Term, Type, Elm, Tele, Sort, Level, MetaId
   getRange (ValueCmp cmp a u v) = getRange (a,u,v)
   getRange (ElimCmp pol a v es es') = getRange (a,v,es,es')
-  getRange (TypeCmp cmp a b) = getRange (a,b)
   getRange (TelCmp a b cmp tel tel') = getRange (a,b,tel,tel')
   getRange (SortCmp cmp s s') = getRange (s,s')
   getRange (LevelCmp cmp l l') = getRange (l,l')
@@ -1061,7 +1060,6 @@ instance Free Constraint where
       ValueCmp _ t u v      -> freeVars' (t, (u, v))
       ValueCmpOnFace _ p t u v -> freeVars' (p, (t, (u, v)))
       ElimCmp _ _ t u es es'  -> freeVars' ((t, u), (es, es'))
-      TypeCmp _ t t'        -> freeVars' (t, t')
       TelCmp _ _ _ tel tel' -> freeVars' (tel, tel')
       SortCmp _ s s'        -> freeVars' (s, s')
       LevelCmp _ l l'       -> freeVars' (l, l')
@@ -1081,19 +1079,18 @@ instance TermLike Constraint where
       ValueCmp _ t u v       -> foldTerm f (t, u, v)
       ValueCmpOnFace _ p t u v -> foldTerm f (p, t, u, v)
       ElimCmp _ _ t u es es' -> foldTerm f (t, u, es, es')
-      TypeCmp _ t t'         -> foldTerm f (t, t')
-      LevelCmp _ l l'        -> foldTerm f (l, l')
+      LevelCmp _ l l'        -> foldTerm f (Level l, Level l')
       IsEmpty _ t            -> foldTerm f t
       CheckSizeLtSat u       -> foldTerm f u
       UnquoteTactic _ t h g  -> foldTerm f (t, h, g)
       Guarded c _            -> foldTerm f c
       TelCmp _ _ _ tel1 tel2 -> foldTerm f (tel1, tel2)
-      SortCmp _ s1 s2        -> foldTerm f (s1, s2)
+      SortCmp _ s1 s2        -> foldTerm f (Sort s1, Sort s2)
       UnBlock _              -> mempty
       FindInstance _ _ _     -> mempty
       CheckFunDef _ _ _ _    -> mempty
       HasBiggerSort s        -> foldTerm f s
-      HasPTSRule a s         -> foldTerm f (a, s)
+      HasPTSRule a s         -> foldTerm f (a, Sort <$> s)
       CheckMetaInst m        -> mempty
   traverseTermM f c = __IMPOSSIBLE__ -- Not yet implemented
 
@@ -1137,18 +1134,26 @@ dirToCmp cont DirGeq = flip $ cont CmpLeq
 -- | We can either compare two terms at a given type, or compare two
 --   types without knowing (or caring about) their sorts.
 data CompareAs
-  = AsTermsOf Type
+  = AsTermsOf Type -- ^ @Type@ should not be @Size@.
+                   --   But currently, we do not rely on this invariant.
+  | AsSizes        -- ^ Replaces @AsTermsOf Size@.
   | AsTypes
   deriving (Data, Show)
 
 instance Free CompareAs where
   freeVars' (AsTermsOf a) = freeVars' a
+  freeVars' AsSizes       = mempty
   freeVars' AsTypes       = mempty
 
 instance TermLike CompareAs where
   foldTerm f (AsTermsOf a) = foldTerm f a
+  foldTerm f AsSizes       = mempty
   foldTerm f AsTypes       = mempty
-  traverseTermM f c = __IMPOSSIBLE__ -- not yet implemented
+
+  traverseTermM f = \case
+    AsTermsOf a -> AsTermsOf <$> traverseTermM f a
+    AsSizes     -> return AsSizes
+    AsTypes     -> return AsTypes
 
 ---------------------------------------------------------------------------
 -- * Open things
@@ -1254,7 +1259,7 @@ data CheckedTarget = CheckedTarget (Maybe ProblemId)
 data TypeCheckingProblem
   = CheckExpr Comparison A.Expr Type
   | CheckArgs ExpandHidden Range [NamedArg A.Expr] Type Type ([Maybe Range] -> Elims -> Type -> CheckedTarget -> TCM Term)
-  | CheckProjAppToKnownPrincipalArg Comparison A.Expr ProjOrigin (NonemptyList QName) A.Args Type Int Term Type
+  | CheckProjAppToKnownPrincipalArg Comparison A.Expr ProjOrigin (NonEmpty QName) A.Args Type Int Term Type
   | CheckLambda Comparison (Arg ([WithHiding Name], Maybe Type)) A.Expr Type
     -- ^ @(λ (xs : t₀) → e) : t@
     --   This is not an instance of 'CheckExpr' as the domain type
@@ -1408,19 +1413,42 @@ instance Eq InteractionPoint where (==) = (==) `on` ipMeta
 --   'ipSolved' to @True@.  (Issue #2368)
 type InteractionPoints = Map InteractionId InteractionPoint
 
+
+-- | Flag to indicate whether the meta is overapplied in the
+--   constraint.  A meta is overapplied if it has more arguments than
+--   the size of the telescope in its creation environment
+--   (as stored in MetaInfo).
+data Overapplied = Overapplied | NotOverapplied deriving (Eq, Show, Data)
+
+-- | Datatype representing a single boundary condition:
+--   x_0 = u_0, ... ,x_n = u_n ⊢ t = ?n es
+data IPBoundary' t = IPBoundary
+  { ipbEquations :: [(t,t)] -- ^ [x_0 = u_0, ... ,x_n = u_n]
+  , ipbValue     :: t          -- ^ @t@
+  , ipbMetaApp   :: t          -- ^ @?n es@
+  , ipbOverapplied :: Overapplied -- ^ Is @?n@ overapplied in @?n es@ ?
+  }
+  deriving (Show, Data, Functor, Foldable, Traversable)
+
+type IPBoundary = IPBoundary' Term
+
 -- | Which clause is an interaction point located in?
 data IPClause = IPClause
-  { ipcQName    :: QName  -- ^ The name of the function.
-  , ipcClauseNo :: Int    -- ^ The number of the clause of this function.
-  , ipcClause   :: A.RHS  -- ^ The original AST clause rhs.
+  { ipcQName    :: QName              -- ^ The name of the function.
+  , ipcClauseNo :: Int                -- ^ The number of the clause of this function.
+  , ipcType     :: Type               -- ^ The type of the function
+  , ipcWithSub  :: Maybe Substitution -- ^ Module parameter substitution
+  , ipcClause   :: A.SpineClause      -- ^ The original AST clause.
+  , ipcClosure  :: Closure ()         -- ^ Environment for rechecking the clause.
+  , ipcBoundary :: [Closure IPBoundary] -- ^ The boundary imposed by the LHS.
   }
   | IPNoClause -- ^ The interaction point is not in the rhs of a clause.
-  deriving Data
+  deriving (Data)
 
 instance Eq IPClause where
-  IPNoClause     == IPNoClause       = True
-  IPClause x i _ == IPClause x' i' _ = x == x' && i == i'
-  _              == _                = False
+  IPNoClause           == IPNoClause             = True
+  IPClause x i _ _ _ _ _ == IPClause x' i' _ _ _ _ _ = x == x' && i == i'
+  _                    == _                      = False
 
 ---------------------------------------------------------------------------
 -- ** Signature
@@ -1665,6 +1693,10 @@ data Definition = Defn
     -- ^ Should the def be treated as injective by the pattern matching unifier?
   , defCopatternLHS   :: Bool
     -- ^ Is this a function defined by copatterns?
+  , defBlocked        :: Blocked_
+    -- ^ What blocking tag to use when we cannot reduce this def?
+    --   Used when checking a function definition is blocked on a meta
+    --   in the type.
   , theDef            :: Defn
   }
     deriving (Data, Show)
@@ -1706,6 +1738,7 @@ defaultDefn info x t def = Defn
   , defNoCompilation  = False
   , defInjective      = False
   , defCopatternLHS   = False
+  , defBlocked        = NotBlocked ReallyNotBlocked ()
   , theDef            = def
   }
 
@@ -1906,7 +1939,6 @@ data Defn = Axiom -- ^ Postulate
           | Datatype
             { dataPars           :: Nat            -- ^ Number of parameters.
             , dataIxs            :: Nat            -- ^ Number of indices.
-            , dataInduction      :: Induction      -- ^ @data@ or @codata@ (legacy).
             , dataClause         :: (Maybe Clause) -- ^ This might be in an instantiated module.
             , dataCons           :: [QName]
               -- ^ Constructor names , ordered according to the order of their definition.
@@ -1929,7 +1961,7 @@ data Defn = Axiom -- ^ Postulate
               -- ^ Constructor name and fields.
             , recNamedCon       :: Bool
               -- ^ Does this record have a @constructor@?
-            , recFields         :: [Arg QName]
+            , recFields         :: [Dom QName]
               -- ^ The record field names.
             , recTel            :: Telescope
               -- ^ The record field telescope. (Includes record parameters.)
@@ -2025,7 +2057,6 @@ instance Pretty Defn where
     "Datatype {" <?> vcat
       [ "dataPars       =" <?> pshow dataPars
       , "dataIxs        =" <?> pshow dataIxs
-      , "dataInduction  =" <?> pshow dataInduction
       , "dataClause     =" <?> pretty dataClause
       , "dataCons       =" <?> pshow dataCons
       , "dataSort       =" <?> pretty dataSort
@@ -2555,6 +2586,7 @@ data TCEnv =
           , envMutualBlock         :: Maybe MutualId -- ^ the current (if any) mutual block
           , envTerminationCheck    :: TerminationCheck ()  -- ^ are we inside the scope of a termination pragma
           , envCoverageCheck       :: CoverageCheck        -- ^ are we inside the scope of a coverage pragma
+          , envMakeCase            :: Bool                 -- ^ are we inside a make-case (if so, ignore forcing analysis in unifier)
           , envSolvingConstraints  :: Bool
                 -- ^ Are we currently in the process of solving active constraints?
           , envCheckingWhere       :: Bool
@@ -2681,6 +2713,7 @@ initEnv = TCEnv { envContext             = []
                 , envMutualBlock         = Nothing
                 , envTerminationCheck    = TerminationCheck
                 , envCoverageCheck       = YesCoverageCheck
+                , envMakeCase            = False
                 , envSolvingConstraints  = False
                 , envCheckingWhere       = False
                 , envActiveProblems      = Set.empty
@@ -2783,6 +2816,9 @@ eTerminationCheck f e = f (envTerminationCheck e) <&> \ x -> e { envTerminationC
 
 eCoverageCheck :: Lens' CoverageCheck TCEnv
 eCoverageCheck f e = f (envCoverageCheck e) <&> \ x -> e { envCoverageCheck = x }
+
+eMakeCase :: Lens' Bool TCEnv
+eMakeCase f e = f (envMakeCase e) <&> \ x -> e { envMakeCase = x }
 
 eSolvingConstraints :: Lens' Bool TCEnv
 eSolvingConstraints f e = f (envSolvingConstraints e) <&> \ x -> e { envSolvingConstraints = x }
@@ -2926,7 +2962,13 @@ aModeToDef _ = Nothing
 data ExpandHidden
   = ExpandLast      -- ^ Add implicit arguments in the end until type is no longer hidden 'Pi'.
   | DontExpandLast  -- ^ Do not append implicit arguments.
+  | ReallyDontExpandLast -- ^ Makes 'doExpandLast' have no effect. Used to avoid implicit insertion of arguments to metavariables.
   deriving (Eq, Data)
+
+isDontExpandLast :: ExpandHidden -> Bool
+isDontExpandLast ExpandLast           = False
+isDontExpandLast DontExpandLast       = True
+isDontExpandLast ReallyDontExpandLast = True
 
 -- | A candidate solution for an instance meta is a term with its type.
 --   It may be the case that the candidate is not fully applied yet or
@@ -3015,7 +3057,7 @@ data Warning
     --   `old` is deprecated, use `new` instead. This will be an error in Agda `version`.
   | UserWarning String
     -- ^ User-defined warning (e.g. to mention that a name is deprecated)
-  | FixityInRenamingModule (NonemptyList Range)
+  | FixityInRenamingModule (NonEmpty Range)
     -- ^ Fixity of modules cannot be changed via renaming (since modules have no fixity).
   | ModuleDoesntExport C.QName [C.ImportedName]
     -- ^ Some imported names are not actually exported by the source module
@@ -3168,7 +3210,11 @@ data TerminationError = TerminationError
 data SplitError
   = NotADatatype        (Closure Type)  -- ^ Neither data type nor record.
   | IrrelevantDatatype  (Closure Type)  -- ^ Data type, but in irrelevant position.
-  | ErasedDatatype      (Closure Type)  -- ^ Data type, but in erased position.
+  | ErasedDatatype Bool (Closure Type)  -- ^ Data type, but in erased position.
+                                        --   If the boolean is 'True',
+                                        --   then the reason for the
+                                        --   error is that the K rule
+                                        --   is turned off.
   | CoinductiveDatatype (Closure Type)  -- ^ Split on codata not allowed.
   -- UNUSED, but keep!
   -- -- | NoRecordConstructor Type  -- ^ record type, but no constructor
@@ -3199,6 +3245,7 @@ data UnificationFailure
   = UnifyIndicesNotVars Telescope Type Term Term Args -- ^ Failed to apply injectivity to constructor of indexed datatype
   | UnifyRecursiveEq Telescope Type Int Term          -- ^ Can't solve equation because variable occurs in (type of) lhs
   | UnifyReflexiveEq Telescope Type Term              -- ^ Can't solve reflexive equation because --without-K is enabled
+  | UnifyUnusableModality Telescope Type Int Term Modality  -- ^ Can't solve equation because solution modality is less "usable"
   deriving (Show)
 
 data UnquoteError
@@ -3360,8 +3407,8 @@ data TypeError
         | AbstractConstructorNotInScope A.QName
         | NotInScope [C.QName]
         | NoSuchModule C.QName
-        | AmbiguousName C.QName (NonemptyList A.QName)
-        | AmbiguousModule C.QName (NonemptyList A.ModuleName)
+        | AmbiguousName C.QName (NonEmpty A.QName)
+        | AmbiguousModule C.QName (NonEmpty A.ModuleName)
         | ClashingDefinition C.QName A.QName
         | ClashingModule A.ModuleName A.ModuleName
         | ClashingImport C.Name A.QName
@@ -3385,7 +3432,7 @@ data TypeError
     -- Pattern synonym errors
         | BadArgumentsToPatternSynonym A.AmbiguousQName
         | TooFewArgumentsToPatternSynonym A.AmbiguousQName
-        | CannotResolveAmbiguousPatternSynonym (NonemptyList (A.QName, A.PatternSynDefn))
+        | CannotResolveAmbiguousPatternSynonym (NonEmpty (A.QName, A.PatternSynDefn))
         | UnusedVariableInPatternSynonym
     -- Operator errors
         | NoParseForApplication [C.Expr]
@@ -3744,8 +3791,8 @@ instance MonadTCState m => MonadTCState (IdentityT m) where
 
 -- ** @TCState@ accessors (no lenses)
 
-getsTC :: MonadTCState m => (TCState -> a) -> m a
-getsTC f = f <$> getTC
+getsTC :: ReadTCState m => (TCState -> a) -> m a
+getsTC f = f <$> getTCState
 
 -- | A variant of 'modifyTC' in which the computation is strict in the
 -- new state.
@@ -3761,7 +3808,7 @@ modifyTC' f = do
 
 -- ** @TCState@ accessors via lenses
 
-useTC :: MonadTCState m => Lens' a TCState -> m a
+useTC :: ReadTCState m => Lens' a TCState -> m a
 useTC l = do
   !x <- getsTC (^. l)
   return x
@@ -4128,8 +4175,8 @@ instance KillRange Section where
   killRange (Section tel) = killRange1 Section tel
 
 instance KillRange Definition where
-  killRange (Defn ai name t pols occs gens gpars displ mut compiled inst copy ma nc inj copat def) =
-    killRange17 Defn ai name t pols occs gens gpars displ mut compiled inst copy ma nc inj copat def
+  killRange (Defn ai name t pols occs gens gpars displ mut compiled inst copy ma nc inj copat blk def) =
+    killRange18 Defn ai name t pols occs gens gpars displ mut compiled inst copy ma nc inj copat blk def
     -- TODO clarify: Keep the range in the defName field?
 
 instance KillRange NumGeneralizableArgs where
@@ -4185,7 +4232,7 @@ instance KillRange Defn where
       AbstractDefn{} -> __IMPOSSIBLE__ -- only returned by 'getConstInfo'!
       Function cls comp ct tt covering inv mut isAbs delayed proj flags term extlam with ->
         killRange14 Function cls comp ct tt covering inv mut isAbs delayed proj flags term extlam with
-      Datatype a b c d e f g h i     -> killRange8 Datatype a b c d e f g h i
+      Datatype a b c d e f g h       -> killRange7 Datatype a b c d e f g h
       Record a b c d e f g h i j k   -> killRange11 Record a b c d e f g h i j k
       Constructor a b c d e f g h i j-> killRange10 Constructor a b c d e f g h i j
       Primitive a b c d e            -> killRange5 Primitive a b c d e

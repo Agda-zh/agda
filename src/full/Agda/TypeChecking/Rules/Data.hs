@@ -56,7 +56,7 @@ import Agda.Utils.Impossible
 
 -- | Type check a datatype definition. Assumes that the type has already been
 --   checked.
-checkDataDef :: Info.DefInfo -> QName -> UniverseCheck -> A.DataDefParams -> [A.Constructor] -> TCM ()
+checkDataDef :: A.DefInfo -> QName -> UniverseCheck -> A.DataDefParams -> [A.Constructor] -> TCM ()
 checkDataDef i name uc (A.DataDefParams gpars ps) cs =
     traceCall (CheckDataDef (getRange name) name ps cs) $ do
 
@@ -140,7 +140,6 @@ checkDataDef i name uc (A.DataDefParams gpars ps) cs =
             let dataDef = Datatype
                   { dataPars       = npars
                   , dataIxs        = nofIxs
-                  , dataInduction  = Inductive
                   , dataClause     = Nothing
                   , dataCons       = []     -- Constructors are added later
                   , dataSort       = s
@@ -149,7 +148,7 @@ checkDataDef i name uc (A.DataDefParams gpars ps) cs =
                   , dataPathCons   = []     -- Path constructors are added later
                   }
 
-            escapeContext npars $ do
+            unsafeEscapeContext npars $ do
               addConstant name $
                 defaultDefn defaultArgInfo name t dataDef
                 -- polarity and argOcc.s determined by the positivity checker
@@ -210,10 +209,16 @@ checkConstructor d uc tel nofIxs s con@(A.Axiom _ i ai Nothing c e) =
           Relevant   -> return ()
           Irrelevant -> typeError $ GenericError $ "Irrelevant constructors are not supported"
           NonStrict  -> typeError $ GenericError $ "Shape-irrelevant constructors are not supported"
+        case getQuantity ai of
+          Quantityω{} -> return ()
+          Quantity0{} -> typeError $ GenericError $ "Erased constructors are not supported"
+          Quantity1{} -> typeError $ GenericError $ "Quantity-restricted constructors are not supported"
         -- check that the type of the constructor is well-formed
         (t, isPathCons) <- checkConstructorType e d
-        -- compute which constructor arguments are forced
-        forcedArgs <- computeForcingAnnotations c t
+        -- compute which constructor arguments are forced (only point constructors)
+        forcedArgs <- if isPathCons == PointCons
+                      then computeForcingAnnotations c t
+                      else return []
         -- check that the sort (universe level) of the constructor type
         -- is contained in the sort of the data type
         -- (to avoid impredicative existential types)
@@ -235,13 +240,12 @@ checkConstructor d uc tel nofIxs s con@(A.Axiom _ i ai Nothing c e) =
         params <- getContextTelescope
 
         -- add parameters to constructor type and put into signature
-        let con = ConHead c Inductive [] -- data constructors have no projectable fields and are always inductive
-        escapeContext (size tel) $ do
+        unsafeEscapeContext (size tel) $ do
 
           -- Cannot compose indexed inductive types yet.
-          (comp, projNames) <- if nofIxs /= 0 || (Info.defAbstract i == AbstractDef)
-            then return (emptyCompKit, Nothing)
-            else inTopContext $ do
+          (con, comp, projNames) <- if nofIxs /= 0 || (Info.defAbstract i == AbstractDef)
+            then return (ConHead c Inductive [], emptyCompKit, Nothing)
+            else unsafeInTopContext $ do
               -- Name for projection of ith field of constructor c is just c-i
               names <- forM [0 .. size fields - 1] $ \ i ->
                 freshAbstractQName'_ $ P.prettyShow (A.qnameName c) ++ "-" ++ show i
@@ -257,9 +261,11 @@ checkConstructor d uc tel nofIxs s con@(A.Axiom _ i ai Nothing c e) =
                 , "names  =" <+> pretty names
                 ]
 
+              let con = ConHead c Inductive $ zipWith (<$) names $ map argFromDom $ telToList fields
+
               defineProjections d con params names fields dataT
               comp <- defineCompData d con params names fields dataT boundary
-              return (comp, Just names)
+              return (con, comp, Just names)
 
           addConstant c $
             defaultDefn defaultArgInfo c (telePi tel t) $ Constructor
@@ -496,7 +502,7 @@ defineCompData d con params names fsT t boundary = do
 
         -- Δ.Φ ⊢ u = Con con ConOSystem $ teleElims fsT boundary : R δ
 --        u = Con con ConOSystem $ teleElims fsT boundary
-        up = ConP con (ConPatternInfo Nothing False Nothing False) $
+        up = ConP con (ConPatternInfo defaultPatternInfo False False Nothing False) $
                telePatterns (d0 `applySubst` fsT) (liftS (size fsT) d0 `applySubst` boundary)
 --        gamma' = telFromList $ take (size gamma - 1) $ telToList gamma
 
@@ -517,6 +523,7 @@ defineCompData d con params names fsT t boundary = do
             , clauseCatchall = False
             , clauseBody = Just $ body
             , clauseUnreachable = Just False
+            , clauseEllipsis = NoEllipsis
             }
 
                | otherwise
@@ -529,6 +536,7 @@ defineCompData d con params names fsT t boundary = do
             , clauseCatchall = False
             , clauseBody = Just $ body
             , clauseUnreachable = Just False
+            , clauseEllipsis = NoEllipsis
             }
         cs = [clause]
       addClauses theName cs
@@ -566,7 +574,7 @@ defineProjections dataname con params names fsT t = do
       reportSDoc "tc.data.proj" 20 $ sep [ "proj" <+> prettyTCM (i,ty) , nest 2 $ prettyTCM projType ]
 
     let
-      cpi  = ConPatternInfo Nothing False (Just $ argN $ raise (size fsT) t) False
+      cpi  = ConPatternInfo defaultPatternInfo False False (Just $ argN $ raise (size fsT) t) False
       conp = defaultArg $ ConP con cpi $ teleNamedArgs fsT
       clause = Clause
           { clauseTel = abstract params fsT
@@ -577,6 +585,7 @@ defineProjections dataname con params names fsT t = do
           , clauseCatchall = False
           , clauseBody = Just $ var i
           , clauseUnreachable = Just False
+          , clauseEllipsis = NoEllipsis
           }
 
     noMutualBlock $ do
@@ -1211,8 +1220,7 @@ isCoinductive t = do
         Axiom       {} -> return (Just False)
         DataOrRecSig{} -> return Nothing
         Function    {} -> return Nothing
-        Datatype    { dataInduction = CoInductive } -> return (Just True)
-        Datatype    { dataInduction = Inductive   } -> return (Just False)
+        Datatype    {} -> return (Just False)
         Record      {  recInduction = Just CoInductive } -> return (Just True)
         Record      {  recInduction = _                } -> return (Just False)
         GeneralizableVar{} -> __IMPOSSIBLE__

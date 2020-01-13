@@ -40,7 +40,7 @@ import Agda.Interaction.Response
   ( Response( Resp_HighlightingInfo )
   , RemoveTokenBasedHighlighting( KeepHighlighting )
   )
-import Agda.Interaction.Highlighting.Precise
+import Agda.Interaction.Highlighting.Precise as P
 import Agda.Interaction.Highlighting.Range (rToR, minus)  -- Range is ambiguous
 
 import qualified Agda.TypeChecking.Errors as E
@@ -54,7 +54,7 @@ import Agda.TypeChecking.Warnings (runPM)
 import Agda.Syntax.Abstract (IsProjP(..))
 import qualified Agda.Syntax.Abstract as A
 import Agda.Syntax.Concrete (FieldAssignment'(..))
-import Agda.Syntax.Concrete.Definitions ( DeclarationWarning(..) )
+import Agda.Syntax.Concrete.Definitions as W ( DeclarationWarning(..) )
 import qualified Agda.Syntax.Common as Common
 import qualified Agda.Syntax.Concrete.Name as C
 import Agda.Syntax.Fixity
@@ -92,7 +92,7 @@ import Agda.Utils.Impossible
 --   highlighted as being type-checked.
 
 highlightAsTypeChecked
-  :: MonadTCM tcm
+  :: (MonadTCM tcm, ReadTCState tcm)
   => Range   -- ^ @rPre@
   -> Range   -- ^ @r@
   -> tcm a
@@ -118,7 +118,7 @@ highlightAsTypeChecked rPre r m
 -- | Lispify and print the given highlighting information.
 
 printHighlightingInfo ::
-  MonadTCM tcm =>
+  (MonadTCM tcm, ReadTCState tcm) =>
   RemoveTokenBasedHighlighting ->
   HighlightingInfo ->
   tcm ()
@@ -180,8 +180,11 @@ generateAndPrintSyntaxInfo decl hlLevel updateState = do
 
     let nameInfo = mconcat $ map (generate modMap file kinds) names
 
-    -- Constructors are only highlighted after type checking, since they
-    -- can be overloaded.
+    -- After the code has been type checked more information may be
+    -- available for overloaded constructors, and
+    -- generateConstructorInfo takes advantage of this information.
+    -- Note, however, that highlighting for overloaded constructors is
+    -- included also in nameInfo.
     constructorInfo <- case hlLevel of
       Full{} -> generateConstructorInfo modMap file kinds decl
       _      -> return mempty
@@ -229,7 +232,7 @@ generateAndPrintSyntaxInfo decl hlLevel updateState = do
     universeBi decl
 
   -- Bound variables, dotted patterns, record fields, module names,
-  -- the "as" and "to" symbols.
+  -- the "as" and "to" symbols and some other things.
   theRest modMap file = mconcat
     [ Fold.foldMap getFieldDecl   $ universeBi decl
     , Fold.foldMap getVarAndField $ universeBi decl
@@ -316,7 +319,7 @@ generateAndPrintSyntaxInfo decl hlLevel updateState = do
         parserBased { aspect = Just $ Name (Just Argument) False }
 
     getBinder :: A.Binder -> File
-    getBinder (A.Binder p n) = mconcat $ bound n : map getPattern (maybeToList p)
+    getBinder (A.Binder _ n) = bound n
 
     getLet :: A.LetBinding -> File
     getLet (A.LetBind _ _ x _ _)     = bound x
@@ -690,7 +693,9 @@ warningHighlighting w = case tcWarning w of
     InvalidCoverageCheckPragma{}     -> deadcodeHighlighting $ getRange w
     OpenPublicAbstract{}             -> deadcodeHighlighting $ getRange w
     OpenPublicPrivate{}              -> deadcodeHighlighting $ getRange w
-    ShadowingInTelescope nrs -> Fold.foldMap (shadowingTelHighlighting . snd) nrs
+    W.ShadowingInTelescope nrs       -> Fold.foldMap
+                                          (shadowingTelHighlighting . snd)
+                                          nrs
     MissingDefinitions{}             -> missingDefinitionHighlighting $ getRange w
     -- TODO: explore highlighting opportunities here!
     InvalidCatchallPragma{}           -> mempty
@@ -734,9 +739,12 @@ coverageErrorHighlighting r = singleton (rToR $ P.continuousPerLine r) m
 
 shadowingTelHighlighting :: [Range] -> File
 shadowingTelHighlighting =
-  -- we do not want to highlight the one variable in scope as deadcode
-  -- so we take the @init@ segment of the ranges in question
-  Fold.foldMap deadcodeHighlighting . init
+  -- we do not want to highlight the one variable in scope so we take
+  -- the @init@ segment of the ranges in question
+  Fold.foldMap (\r -> singleton (rToR $ P.continuous r) m) . init
+  where
+  m = parserBased { otherAspects =
+                      Set.singleton P.ShadowingInTelescope }
 
 catchallHighlighting :: Range -> File
 catchallHighlighting r = singleton (rToR $ P.continuousPerLine r) m
@@ -797,7 +805,6 @@ constraintsHighlighting cs =
     Closure{ clValue = IsEmpty r t           } -> Just r
     Closure{ clEnv = e, clValue = ValueCmp{} } -> Just $ getRange (envRange e)
     Closure{ clEnv = e, clValue = ElimCmp{}  } -> Just $ getRange (envRange e)
-    Closure{ clEnv = e, clValue = TypeCmp{}  } -> Just $ getRange (envRange e)
     Closure{ clEnv = e, clValue = TelCmp{}   } -> Just $ getRange (envRange e)
     Closure{ clEnv = e, clValue = SortCmp{}  } -> Just $ getRange (envRange e)
     Closure{ clEnv = e, clValue = LevelCmp{} } -> Just $ getRange (envRange e)
@@ -937,20 +944,32 @@ nameToFileA modMap file x include m =
              file
              (concreteQualifier x)
              (concreteBase x)
-             r
+             rangeOfFixityDeclaration
              m
              (if include then Just $ bindingSite x else Nothing)
     `mappend` notationFile
   where
-    -- Andreas, 2016-09-08, for issue #2140:
-    -- Range of name from fixity declaration:
-    fr = theNameRange $ A.nameFixity $ A.qnameName x
-    -- Somehow we import fixity ranges from other files, we should ignore them.
-    -- (I do not understand how we get them as they should not be serialized...)
-    r = if P.rangeFile fr == Strict.Just file then fr else noRange
+  -- TODO: Currently we highlight fixity and syntax declarations by
+  -- producing highlighting something like once per occurrence of the
+  -- related name(s) in the file of the declaration (and we explicitly
+  -- avoid doing this for other files). Perhaps it would be better to
+  -- only produce this highlighting once.
 
-    notationFile = mconcat $ map genPartFile $ theNotation $ A.nameFixity $ A.qnameName x
+  rangeOfFixityDeclaration =
+    if P.rangeFile r == Strict.Just file
+    then r else noRange
+    where
+    r = theNameRange $ A.nameFixity $ A.qnameName x
+
+  notationFile =
+    if P.rangeFile (getRange notation) == Strict.Just file
+    then mconcat $ map genPartFile notation
+    else mempty
+    where
+    notation = theNotation $ A.nameFixity $ A.qnameName x
+
     boundAspect = parserBased{ aspect = Just $ Name (Just Bound) False }
+
     genPartFile (BindHole r i)   = several [rToR r, rToR $ getRange i] boundAspect
     genPartFile (NormalHole r i) = several [rToR r, rToR $ getRange i] boundAspect
     genPartFile WildHole{}       = mempty

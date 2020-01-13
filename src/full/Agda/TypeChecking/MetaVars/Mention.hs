@@ -53,6 +53,7 @@ instance MentionsMeta Sort where
     Inf        -> False
     SizeUniv   -> False
     PiSort a s -> mentionsMetas xs (a, s)
+    FunSort s1 s2 -> mentionsMetas xs (s1, s2)
     UnivSort s -> mentionsMetas xs s
     MetaS m es -> HashSet.member m xs || mentionsMetas xs es
     DefS d es  -> mentionsMetas xs es
@@ -102,7 +103,6 @@ instance MentionsMeta Constraint where
     ValueCmpOnFace _ p t u v    -> mm ((p,t), u, v)
     ElimCmp _ _ t v as bs -> mm ((t, v), (as, bs))
     LevelCmp _ u v      -> mm (u, v)
-    TypeCmp _ a b       -> mm (a, b)
     TelCmp a b _ u v    -> mm ((a, b), (u, v))
     SortCmp _ a b       -> mm (a, b)
     Guarded{}           -> False  -- This gets woken up when the problem it's guarded by is solved
@@ -123,8 +123,10 @@ instance MentionsMeta Constraint where
       mm v = mentionsMetas xs v
 
 instance MentionsMeta CompareAs where
-  mentionsMetas xs (AsTermsOf a) = mentionsMetas xs a
-  mentionsMetas xs AsTypes       = False
+  mentionsMetas xs = \case
+    AsTermsOf a -> mentionsMetas xs a
+    AsSizes -> False
+    AsTypes -> False
 
 -- instance (Ord k, MentionsMeta e) => MentionsMeta (Map k e) where
 --   mentionsMeta = traverse mentionsMeta

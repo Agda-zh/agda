@@ -3,6 +3,8 @@ module Agda.TypeChecking.Level where
 
 import Data.Maybe
 import qualified Data.List as List
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Traversable (traverse)
 
 import Agda.Syntax.Common
@@ -16,7 +18,6 @@ import Agda.TypeChecking.Monad.Builtin
 
 import Agda.Utils.Maybe ( caseMaybeM, allJustM )
 import Agda.Utils.Monad ( tryMaybe )
-import Agda.Utils.NonemptyList
 import Agda.Utils.Singleton
 
 import Agda.Utils.Impossible
@@ -136,8 +137,8 @@ levelView' a = do
   Def lsuc  [] <- fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelSuc
   Def lmax  [] <- fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelMax
   let view a = do
-        a <- reduce a
-        case a of
+        ba <- reduceB a
+        case ignoreBlocking ba of
           Level l -> return l
           Def s [Apply arg]
             | s == lsuc  -> levelSuc <$> view (unArg arg)
@@ -145,16 +146,18 @@ levelView' a = do
             | z == lzero -> return $ ClosedLevel 0
           Def m [Apply arg1, Apply arg2]
             | m == lmax  -> levelLub <$> view (unArg arg1) <*> view (unArg arg2)
-          _              -> mkAtom a
-  v <- view a
-  return v
+          _              -> return $ mkAtom ba
+  view a
   where
-    mkAtom a = do
-      b <- reduceB a
-      return $ case b of
-        NotBlocked _ (MetaV m as) -> atomicLevel $ MetaLevel m as
-        NotBlocked r _            -> atomicLevel $ NeutralLevel r $ ignoreBlocking b
-        Blocked m _               -> atomicLevel $ BlockedLevel m $ ignoreBlocking b
+    mkAtom ba = atomicLevel $ case ba of
+        NotBlocked _ (MetaV m as) -> MetaLevel m as
+        NotBlocked r _            -> case r of
+          StuckOn{}               -> NeutralLevel r $ ignoreBlocking ba
+          Underapplied{}          -> NeutralLevel r $ ignoreBlocking ba
+          AbsurdMatch{}           -> NeutralLevel r $ ignoreBlocking ba
+          MissingClauses{}        -> UnreducedLevel $ ignoreBlocking ba
+          ReallyNotBlocked{}      -> NeutralLevel r $ ignoreBlocking ba
+        Blocked m _               -> BlockedLevel m $ ignoreBlocking ba
 
 -- | Given a level @l@, find the maximum constant @n@ such that @l = n + l'@
 levelPlusView :: Level -> (Integer, Level)
@@ -222,14 +225,14 @@ unSingleLevels ls = levelMax n as
     n = maximum $ 0 : [m | SingleClosed m <- ls]
     as = [a | SinglePlus a <- ls]
 
-levelMaxView :: Level -> NonemptyList SingleLevel
+levelMaxView :: Level -> NonEmpty SingleLevel
 levelMaxView (Max n [])     = singleton $ SingleClosed n
-levelMaxView (Max 0 (a:as)) = SinglePlus a :! map SinglePlus as
-levelMaxView (Max n as)     = SingleClosed n :! map SinglePlus as
+levelMaxView (Max 0 (a:as)) = SinglePlus a :| map SinglePlus as
+levelMaxView (Max n as)     = SingleClosed n :| map SinglePlus as
 
 singleLevelView :: Level -> Maybe SingleLevel
 singleLevelView l = case levelMaxView l of
-  s :! [] -> Just s
+  s :| [] -> Just s
   _       -> Nothing
 
 instance Subst Term SingleLevel where

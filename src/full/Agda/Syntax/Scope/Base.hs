@@ -14,6 +14,8 @@ import Control.Monad
 import Data.Either (partitionEithers)
 import Data.Function
 import qualified Data.List as List
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
@@ -39,7 +41,6 @@ import Agda.Utils.Functor
 import Agda.Utils.Lens
 import Agda.Utils.List
 import Agda.Utils.Maybe (filterMaybe)
-import Agda.Utils.NonemptyList
 import Agda.Utils.Null
 import Agda.Utils.Pretty
 import Agda.Utils.Singleton
@@ -65,9 +66,6 @@ data NameSpaceId
   = PrivateNS        -- ^ Things not exported by this module.
   | PublicNS         -- ^ Things defined and exported by this module.
   | ImportedNS       -- ^ Things from open public, exported by this module.
-  | OnlyQualifiedNS  -- ^ Visible (as qualified) from outside,
-                     --   but not exported when opening the module.
-                     --   Used for qualified constructors.
   deriving (Data, Eq, Bounded, Enum, Show)
 
 allNameSpaces :: [NameSpaceId]
@@ -78,7 +76,6 @@ type ScopeNameSpaces = [(NameSpaceId, NameSpace)]
 localNameSpace :: Access -> NameSpaceId
 localNameSpace PublicAccess    = PublicNS
 localNameSpace PrivateAccess{} = PrivateNS
-localNameSpace OnlyQualified   = OnlyQualifiedNS
 
 nameSpaceAccess :: NameSpaceId -> Access
 nameSpaceAccess PrivateNS = PrivateAccess Inserted
@@ -114,9 +111,9 @@ data ScopeInfo = ScopeInfo
       }
   deriving (Data, Show)
 
-type NameMap   = Map A.QName      (NonemptyList C.QName)
+type NameMap   = Map A.QName      (NonEmpty C.QName)
 type ModuleMap = Map A.ModuleName [C.QName]
--- type ModuleMap = Map A.ModuleName (NonemptyList C.QName)
+-- type ModuleMap = Map A.ModuleName (NonEmpty C.QName)
 
 instance Eq ScopeInfo where
   ScopeInfo c1 m1 v1 l1 p1 _ _ _ _ _ == ScopeInfo c2 m2 v2 l2 p2 _ _ _ _ _ =
@@ -295,7 +292,7 @@ data InScopeTag a where
   ModuleTag :: InScopeTag AbstractModule
 
 -- | Type class for some dependent-types trickery.
-class Eq a => InScope a where
+class Ord a => InScope a where
   inScopeTag :: InScopeTag a
 
 instance InScope AbstractName where
@@ -445,13 +442,13 @@ data ResolvedName
     DefinedName Access AbstractName -- ^ 'anameKind' can be 'DefName', 'MacroName', 'QuotableName'.
 
   | -- | Record field name.  Needs to be distinguished to parse copatterns.
-    FieldName (NonemptyList AbstractName)       -- ^ @('FldName' ==) . 'anameKind'@ for all names.
+    FieldName (NonEmpty AbstractName)       -- ^ @('FldName' ==) . 'anameKind'@ for all names.
 
   | -- | Data or record constructor name.
-    ConstructorName (NonemptyList AbstractName) -- ^ @('ConName' ==) . 'anameKind'@ for all names.
+    ConstructorName (NonEmpty AbstractName) -- ^ @('ConName' ==) . 'anameKind'@ for all names.
 
   | -- | Name of pattern synonym.
-    PatternSynResName (NonemptyList AbstractName) -- ^ @('PatternSynName' ==) . 'anameKind'@ for all names.
+    PatternSynResName (NonEmpty AbstractName) -- ^ @('PatternSynName' ==) . 'anameKind'@ for all names.
 
   | -- | Unbound name.
     UnknownName
@@ -644,7 +641,7 @@ allNamesInScope' s =
 
 -- | Returns the scope's non-private names.
 exportedNamesInScope :: InScope a => Scope -> ThingsInScope a
-exportedNamesInScope = namesInScope [PublicNS, ImportedNS, OnlyQualifiedNS]
+exportedNamesInScope = namesInScope [PublicNS, ImportedNS]
 
 namesInScope :: InScope a => [NameSpaceId] -> Scope -> ThingsInScope a
 namesInScope ids s =
@@ -684,7 +681,7 @@ setScopeAccess a s = (`updateScopeNameSpaces` s) $ AssocList.mapWithKey $ const 
     zero  = emptyNameSpace
     one   = allThingsInScope s
     imp   = thingsInScope [ImportedNS] s
-    noimp = thingsInScope [PublicNS, PrivateNS, OnlyQualifiedNS] s
+    noimp = thingsInScope [PublicNS, PrivateNS] s
 
     ns b = case (a, b) of
       (PublicNS, PublicNS)   -> noimp
@@ -771,9 +768,6 @@ applyImportDirective_ dir@(ImportDirective{ impRenaming }) s
     -- | Which names are considered to be defined by a module?
     --   The ones actually defined there publicly ('publicNS')
     --   and the ones imported publicly ('ImportedNS')?
-
-    --   TODO: Also 'OnlyQualifiedNS'?
-    --   exportedNamesInScope sUse ?
     exportedNSs = [PublicNS, ImportedNS]
 
     -- | Name clashes introduced by the @renaming@ clause.
@@ -871,10 +865,6 @@ restrictLocalPrivate m =
   where
     rName as = filterMaybe (not . null) $ filter (not . (`isInModule`        m) . anameName) as
     rMod  as = filterMaybe (not . null) $ filter (not . (`isLtChildModuleOf` m) . amodName)  as
-
--- | Remove names that can only be used qualified (when opening a scope)
-removeOnlyQualified :: Scope -> Scope
-removeOnlyQualified s = setNameSpace OnlyQualifiedNS emptyNameSpace s
 
 -- | Disallow using generalized variables from the scope
 disallowGeneralizedVars :: Scope -> Scope
@@ -1010,7 +1000,7 @@ scopeLookup q scope = map fst $ scopeLookup' q scope
 
 scopeLookup' :: forall a. InScope a => C.QName -> ScopeInfo -> [(a, Access)]
 scopeLookup' q scope =
-  List.nubBy ((==) `on` fst) $
+  nubOn fst $
     findName q root ++ maybeToList topImports ++ imports
   where
 
@@ -1111,8 +1101,8 @@ inverseScopeLookup' amb name scope = billToPure [ Scoping , InverseScopeLookup ]
     Left  m -> best $ filter unambiguousModule $ findModule m
     Right q -> best $ filter unambiguousName   $ findName q
   where
-    findName   x = maybe [] toList $ Map.lookup x (scope ^. scopeInverseName)
-    findModule x = fromMaybe []    $ Map.lookup x (scope ^. scopeInverseModule)
+    findName   x = maybe [] NonEmpty.toList $ Map.lookup x (scope ^. scopeInverseName)
+    findModule x = fromMaybe [] $ Map.lookup x (scope ^. scopeInverseModule)
 
     len :: C.QName -> Int
     len (C.QName _)  = 1
@@ -1225,7 +1215,6 @@ instance Pretty NameSpaceId where
     PublicNS        -> "public"
     PrivateNS       -> "private"
     ImportedNS      -> "imported"
-    OnlyQualifiedNS -> "only-qualified"
 
 instance Pretty NameSpace where
   pretty = vcat . prettyNameSpace

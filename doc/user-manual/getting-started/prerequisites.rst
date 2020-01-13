@@ -59,15 +59,15 @@ http://zlib.net 和 http://www.gnu.org/software/ncurses/）。
 
 .. Optionally one can also install the `ICU
 .. <http://site.icu-project.org>`_ library, which is used to implement
-.. the ``--count-clusters`` flag. Under Debian or Ubuntu it may suffice
+.. the :option:`--count-clusters` flag. Under Debian or Ubuntu it may suffice
 .. to install *libicu-dev*. Once the ICU library is installed one can
-.. hopefully enable the ``--count-clusters`` flag by giving the
-.. ``-fenable-cluster-counting`` flag to *cabal install*.
+.. hopefully enable the :option:`--count-clusters` flag by giving the
+.. :option:`enable-cluster-counting` flag to *cabal install*.
 
 此外你也可以安装可选的 `ICU <http://site.icu-project.org>`_ 库，它用于实现
-``--count-clusters`` 选项。在 Debian 或 Ubuntu 上只需安装 *libicu-dev* 即可。
-一旦安装了 ICU 库，你就可以通过为 *cabal install* 添加 ``-fenable-cluster-counting``
-来开启 ``--count-clusters`` 选项了。
+:option:``--count-clusters`` 选项。在 Debian 或 Ubuntu 上只需安装 *libicu-dev* 即可。
+一旦安装了 ICU 库，你就可以通过为 *cabal install* 添加
+:option:``-fenable-cluster-counting`` 来开启 :option:``--count-clusters`` 选项了。
 
 .. _emacs-under-windows:
 

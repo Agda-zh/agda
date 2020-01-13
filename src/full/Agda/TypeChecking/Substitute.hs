@@ -226,8 +226,8 @@ instance Subst Term a => Apply (Tele a) where
   applyE t es = apply t $ fromMaybe __IMPOSSIBLE__ $ allApplyElims es
 
 instance Apply Definition where
-  apply (Defn info x t pol occ gens gpars df m c inst copy ma nc inj copat d) args =
-    Defn info x (piApply t args) (apply pol args) (apply occ args) (apply gens args) (drop (length args) gpars) df m c inst copy ma nc inj copat (apply d args)
+  apply (Defn info x t pol occ gens gpars df m c inst copy ma nc inj copat blk d) args =
+    Defn info x (piApply t args) (apply pol args) (apply occ args) (apply gens args) (drop (length args) gpars) df m c inst copy ma nc inj copat blk (apply d args)
 
   applyE t es = apply t $ fromMaybe __IMPOSSIBLE__ $ allApplyElims es
 
@@ -368,7 +368,7 @@ instance Apply Clause where
     -- It is assumed that we only apply a clause to "parameters", i.e.
     -- arguments introduced by lambda lifting. The problem is that these aren't
     -- necessarily the first elements of the clause telescope.
-    apply cls@(Clause rl rf tel ps b t catchall unreachable) args
+    apply cls@(Clause rl rf tel ps b t catchall unreachable ell) args
       | length args > length ps = __IMPOSSIBLE__
       | otherwise =
       Clause rl rf
@@ -378,6 +378,7 @@ instance Apply Clause where
              (applySubst rho t)
              catchall
              unreachable
+             ell
       where
         -- We have
         --  Γ ⊢ args, for some outer context Γ
@@ -603,9 +604,9 @@ instance Abstract Telescope where
   ExtendTel arg xtel `abstract` tel = ExtendTel arg $ xtel <&> (`abstract` tel)
 
 instance Abstract Definition where
-  abstract tel (Defn info x t pol occ gens gpars df m c inst copy ma nc inj copat d) =
+  abstract tel (Defn info x t pol occ gens gpars df m c inst copy ma nc inj copat blk d) =
     Defn info x (abstract tel t) (abstract tel pol) (abstract tel occ) (abstract tel gens)
-                (replicate (size tel) Nothing ++ gpars) df m c inst copy ma nc inj copat (abstract tel d)
+                (replicate (size tel) Nothing ++ gpars) df m c inst copy ma nc inj copat blk (abstract tel d)
 
 -- | @tel ⊢ (Γ ⊢ lhs ↦ rhs : t)@ becomes @tel, Γ ⊢ lhs ↦ rhs : t)@
 --   we do not need to change lhs, rhs, and t since they live in Γ.
@@ -689,13 +690,14 @@ instance Abstract PrimFun where
         where n = size tel
 
 instance Abstract Clause where
-  abstract tel (Clause rl rf tel' ps b t catchall unreachable) =
+  abstract tel (Clause rl rf tel' ps b t catchall unreachable ell) =
     Clause rl rf (abstract tel tel')
            (namedTelVars m tel ++ ps)
            b
            t -- nothing to do for t, since it lives under the telescope
            catchall
            unreachable
+           ell
       where m = size tel + size tel'
 
 instance Abstract CompiledClauses where
@@ -808,6 +810,7 @@ instance (Coercible a Term, Subst t a) => Subst t (Sort' a) where
     Inf        -> Inf
     SizeUniv   -> SizeUniv
     PiSort a s2 -> coerce $ piSort (coerce $ sub a) (coerce $ sub s2)
+    FunSort s1 s2 -> coerce $ funSort (coerce $ sub s1) (coerce $ sub s2)
     UnivSort s -> coerce $ univSort Nothing $ coerce $ sub s
     MetaS x es -> MetaS x $ sub es
     DefS d es  -> DefS d $ sub es
@@ -841,7 +844,7 @@ instance Subst Term Pattern where
     DefP o q ps  -> DefP o q $ applySubst rho ps
     DotP o t     -> DotP o $ applySubst rho t
     VarP o s     -> p
-    LitP l       -> p
+    LitP o l     -> p
     ProjP{}      -> p
     IApplyP o t u x -> IApplyP o (applySubst rho t) (applySubst rho u) x
 
@@ -944,7 +947,6 @@ instance Subst Term Constraint where
     ValueCmp cmp a u v       -> ValueCmp cmp (rf a) (rf u) (rf v)
     ValueCmpOnFace cmp p t u v -> ValueCmpOnFace cmp (rf p) (rf t) (rf u) (rf v)
     ElimCmp ps fs a v e1 e2  -> ElimCmp ps fs (rf a) (rf v) (rf e1) (rf e2)
-    TypeCmp cmp a b          -> TypeCmp cmp (rf a) (rf b)
     TelCmp a b cmp tel1 tel2 -> TelCmp (rf a) (rf b) cmp (rf tel1) (rf tel2)
     SortCmp cmp s1 s2        -> SortCmp cmp (rf s1) (rf s2)
     LevelCmp cmp l1 l2       -> LevelCmp cmp (rf l1) (rf l2)
@@ -963,6 +965,7 @@ instance Subst Term Constraint where
 
 instance Subst Term CompareAs where
   applySubst rho (AsTermsOf a) = AsTermsOf $ applySubst rho a
+  applySubst rho AsSizes       = AsSizes
   applySubst rho AsTypes       = AsTypes
 
 instance Subst t a => Subst t (Elim' a) where
@@ -1032,36 +1035,40 @@ applyPatSubst = applySubst . fromPatternSubstitution
 
 
 usePatOrigin :: PatOrigin -> Pattern' a -> Pattern' a
-usePatOrigin o p = case patternOrigin p of
+usePatOrigin o p = case patternInfo p of
+  Nothing -> p
+  Just i  -> usePatternInfo (i { patOrigin = o }) p
+
+usePatternInfo :: PatternInfo -> Pattern' a -> Pattern' a
+usePatternInfo i p = case patternOrigin p of
   Nothing         -> p
   Just PatOSplit  -> p
   Just PatOAbsurd -> p
   Just _          -> case p of
-    (VarP _ x) -> VarP o x
-    (DotP _ u) -> DotP o u
-    (ConP c (ConPatternInfo (Just _) ft b l) ps)
-      -> ConP c (ConPatternInfo (Just o) ft b l) ps
-    DefP _ q ps -> DefP o q ps
-    ConP{}  -> __IMPOSSIBLE__
-    LitP{}  -> __IMPOSSIBLE__
+    (VarP _ x) -> VarP i x
+    (DotP _ u) -> DotP i u
+    (ConP c (ConPatternInfo _ r ft b l) ps)
+      -> ConP c (ConPatternInfo i r ft b l) ps
+    DefP _ q ps -> DefP i q ps
+    (LitP _ l) -> LitP i l
     ProjP{} -> __IMPOSSIBLE__
-    (IApplyP _ t u x) -> IApplyP o t u x
+    (IApplyP _ t u x) -> IApplyP i t u x
 
 instance Subst DeBruijnPattern DeBruijnPattern where
   applySubst IdS p = p
   applySubst rho p = case p of
-    VarP o x     ->
-      usePatOrigin o $
+    VarP i x     ->
+      usePatternInfo i $
       useName (dbPatVarName x) $
       lookupS rho $ dbPatVarIndex x
-    DotP o u     -> DotP o $ applyPatSubst rho u
+    DotP i u     -> DotP i $ applyPatSubst rho u
     ConP c ci ps -> ConP c ci $ applySubst rho ps
-    DefP o q ps  -> DefP o q $ applySubst rho ps
-    LitP x       -> p
+    DefP i q ps  -> DefP i q $ applySubst rho ps
+    LitP i x     -> p
     ProjP{}      -> p
-    IApplyP o t u x -> case useName (dbPatVarName x) $ lookupS rho $ dbPatVarIndex x of
-                        IApplyP _ _ _ y -> IApplyP o (applyPatSubst rho t) (applyPatSubst rho u) y
-                        VarP  _ y -> IApplyP o (applyPatSubst rho t) (applyPatSubst rho u) y
+    IApplyP i t u x -> case useName (dbPatVarName x) $ lookupS rho $ dbPatVarIndex x of
+                        IApplyP _ _ _ y -> IApplyP i (applyPatSubst rho t) (applyPatSubst rho u) y
+                        VarP  _ y -> IApplyP i (applyPatSubst rho t) (applyPatSubst rho u) y
                         _ -> __IMPOSSIBLE__
     where
       useName :: PatVarName -> DeBruijnPattern -> DeBruijnPattern
@@ -1256,7 +1263,20 @@ deriving instance Eq Candidate
 deriving instance (Subst t a, Eq a)  => Eq  (Tele a)
 deriving instance (Subst t a, Ord a) => Ord (Tele a)
 
-deriving instance Eq Constraint
+-- Andreas, 2019-11-16, issue #4201: to avoid potential unintended
+-- performance loss, the Eq instance for Constraint is disabled:
+--
+-- -- deriving instance Eq Constraint
+--
+-- I am tempted to write
+--
+--   instance Eq Constraint where (==) = undefined
+--
+-- but this does not give a compilation error anymore when trying
+-- to use equality on constraints.
+-- Therefore, I hope this comment is sufficient to prevent a resurrection
+-- of the Eq instance for Constraint.
+
 deriving instance Eq CompareAs
 deriving instance Eq Section
 
@@ -1296,7 +1316,7 @@ instance Eq a => Eq (Pattern' a) where
   VarP _ x        == VarP _ y          = x == y
   DotP _ u        == DotP _ v          = u == v
   ConP c _ ps     == ConP c' _ qs      = c == c && ps == qs
-  LitP l          == LitP l'           = l == l'
+  LitP _ l        == LitP _ l'         = l == l'
   ProjP _ f       == ProjP _ g         = f == g
   IApplyP _ u v x == IApplyP _ u' v' y = u == u' && v == v' && x == y
   DefP _ f ps     == DefP _ g qs       = f == g && ps == qs
@@ -1410,8 +1430,8 @@ univInf =
 
 -- | Compute the sort of a function type from the sorts of its
 --   domain and codomain.
-funSort' :: Dom Type -> Sort -> Maybe Sort
-funSort' a b = case (getSort a, b) of
+funSort' :: Sort -> Sort -> Maybe Sort
+funSort' a b = case (a, b) of
   (Inf           , _            ) -> Just Inf
   (_             , Inf          ) -> Just Inf
   (Type a , Type b) -> Just $ Type $ levelLub a b
@@ -1422,15 +1442,15 @@ funSort' a b = case (getSort a, b) of
   (Prop a , Prop b) -> Just $ Prop $ levelLub a b
   (a             , b            ) -> Nothing
 
-funSort :: Dom Type -> Sort -> Sort
-funSort a b = fromMaybe (PiSort a (NoAbs underscore b)) $ funSort' a b
+funSort :: Sort -> Sort -> Sort
+funSort a b = fromMaybe (FunSort a b) $ funSort' a b
 
 -- | Compute the sort of a pi type from the sorts of its domain
 --   and codomain.
 piSort' :: Dom Type -> Abs Sort -> Maybe Sort
-piSort' a      (NoAbs _ b) = funSort' a b
+piSort' a      (NoAbs _ b) = funSort' (getSort a) b
 piSort' a bAbs@(Abs   _ b) = case flexRigOccurrenceIn 0 b of
-  Nothing -> Just $ funSort a $ noabsApp __IMPOSSIBLE__ bAbs
+  Nothing -> Just $ funSort (getSort a) $ noabsApp __IMPOSSIBLE__ bAbs
   Just o -> case o of
     StronglyRigid -> Just Inf
     Unguarded     -> Just Inf
@@ -1466,7 +1486,10 @@ piSort' a bAbs@(Abs   _ b) = case flexRigOccurrenceIn 0 b of
 --     Flexible _    -> Nothing
 
 piSort :: Dom Type -> Abs Sort -> Sort
-piSort a b = fromMaybe (PiSort a b) $ piSort' a b
+piSort a b = case piSort' a b of
+  Just s -> s
+  Nothing | NoAbs _ b' <- b -> FunSort (getSort a) b'
+          | otherwise       -> PiSort a b
 
 ---------------------------------------------------------------------------
 -- * Level stuff

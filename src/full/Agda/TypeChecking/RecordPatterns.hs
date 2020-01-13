@@ -63,7 +63,7 @@ recordPatternToProjections p =
     LitP{}       -> typeError $ ShouldBeRecordPattern p
     DotP{}       -> typeError $ ShouldBeRecordPattern p
     ConP c ci ps -> do
-      whenNothing (conPRecord ci) $
+      unless (conPRecord ci) $
         typeError $ ShouldBeRecordPattern p
       let t = unArg $ fromMaybe __IMPOSSIBLE__ $ conPType ci
       reportSDoc "tc.rec" 45 $ vcat
@@ -77,7 +77,7 @@ recordPatternToProjections p =
     IApplyP{}    -> typeError $ ShouldBeRecordPattern p
     DefP{}       -> typeError $ ShouldBeRecordPattern p
   where
-    proj p = (`applyE` [Proj ProjSystem $ unArg p])
+    proj p = (`applyE` [Proj ProjSystem $ unDom p])
     comb :: (Term -> Term) -> DeBruijnPattern -> TCM [Term -> Term]
     comb prj p = map (\ f -> f . prj) <$> recordPatternToProjections p
 
@@ -130,7 +130,7 @@ getEtaAndArity SplitCatchall = return (False, 1)
 translateCompiledClauses
   :: forall m. (HasConstInfo m, MonadChange m)
   => CompiledClauses -> m CompiledClauses
-translateCompiledClauses cc = do
+translateCompiledClauses cc = ignoreAbstractMode $ do
   reportSDoc "tc.cc.record" 20 $ vcat
     [ "translate record patterns in compiled clauses"
     , nest 2 $ return $ pretty cc
@@ -179,7 +179,7 @@ translateCompiledClauses cc = do
           [(c, b)] | not comatch -> -- possible eta-match
             getConstructorInfo c >>= \ case
               RecordCon YesEta fs ->
-                let ch = ConHead c Inductive fs in
+                let ch = ConHead c Inductive (map argFromDom fs) in
                 yesEtaCase ch b
               _ -> noEtaCase
           _ -> noEtaCase
@@ -230,7 +230,7 @@ recordExpressionsToCopatterns = \case
                 traverse recordExpressionsToCopatterns $ Branches
                   { projPatterns   = True
                   , conBranches    = Map.fromList $
-                      zipWith (\ f v -> (unArg f, WithArity 0 $ Done xs v)) fs vs
+                      zipWith (\ f v -> (unDom f, WithArity 0 $ Done xs v)) fs vs
                   , etaBranch      = Nothing
                   , litBranches    = Map.empty
                   , catchAllBranch = Nothing
@@ -362,7 +362,7 @@ translateSplitTree t = snd <$> loop t
       SplittingDone n ->
         -- start with n virgin variables
         return (replicate n True, SplittingDone n)
-      SplitAt i ts    -> do
+      SplitAt i lz ts    -> do
         (x, xs, ts) <- loops (unArg i) ts
         -- if we case on record constructor, drop case
         let t' = if x then
@@ -370,7 +370,7 @@ translateSplitTree t = snd <$> loop t
                      [(c,t)] -> t
                      _       -> __IMPOSSIBLE__
                   -- else retain case
-                  else SplitAt i ts
+                  else SplitAt i lz ts
         return (xs, t')
 
     -- @loops i ts = return (x, xs, ts')@ cf. @loop@
@@ -411,9 +411,9 @@ class DropFrom a where
 instance DropFrom (SplitTree' c) where
   dropFrom i n t = case t of
     SplittingDone m -> SplittingDone (m - n)
-    SplitAt x@(Arg ai j) ts
-      | j >= i + n -> SplitAt (Arg ai $ j - n) $ dropFrom i n ts
-      | j < i      -> SplitAt x $ dropFrom i n ts
+    SplitAt x@(Arg ai j) lz ts
+      | j >= i + n -> SplitAt (Arg ai $ j - n) lz $ dropFrom i n ts
+      | j < i      -> SplitAt x lz $ dropFrom i n ts
       | otherwise  -> __IMPOSSIBLE__
 
 instance DropFrom (c, SplitTree' c) where
@@ -562,7 +562,7 @@ translateRecordPatterns clause = do
         ]
 
   reportSDoc "tc.lhs.recpat" 10 $
-    escapeContext (size $ clauseTel clause) $ vcat
+    unsafeEscapeContext (size $ clauseTel clause) $ vcat
       [ "Translated clause:"
       , nest 2 $ vcat
         [ "delta =" <+> prettyTCM (clauseTel c)
@@ -711,7 +711,7 @@ removeTree tree = do
 translatePattern :: Pattern -> RecPatM (Pattern, [Term], Changes)
 translatePattern p@(ConP c ci ps)
   -- Andreas, 2015-05-28 only translate implicit record patterns
-  | Just PatOSystem <- conPRecord ci = do
+  | conPRecord ci , PatOSystem <- patOrigin (conPInfo ci) = do
       r <- recordTree p
       case r of
         Left  r -> r
@@ -751,7 +751,7 @@ recordTree ::
   Pattern ->
   RecPatM (Either (RecPatM (Pattern, [Term], Changes)) RecordTree)
 -- Andreas, 2015-05-28 only translate implicit record patterns
-recordTree p@(ConP c ci ps) | Just PatOSystem <- conPRecord ci = do
+recordTree p@(ConP c ci ps) | conPRecord ci , PatOSystem <- patOrigin (conPInfo ci) = do
   let t = fromMaybe __IMPOSSIBLE__ $ conPType ci
   rs <- mapM (recordTree . namedArg) ps
   case allRight rs of
@@ -770,7 +770,7 @@ recordTree p@(ConP c ci ps) | Just PatOSystem <- conPRecord ci = do
       -- The content of an @Arg@ might not be reduced (if @Arg@ is @Irrelevant@).
       fields <- getRecordTypeFields =<< reduce (unArg t)
 --      let proj p = \x -> Def (unArg p) [defaultArg x]
-      let proj p = (`applyE` [Proj ProjSystem $ unArg p])
+      let proj p = (`applyE` [Proj ProjSystem $ unDom p])
       return $ Right $ RecCon t $ zip (map proj fields) ts
 recordTree p@(ConP _ ci _) = return $ Left $ translatePattern p
 recordTree p@DefP{} = return $ Left $ translatePattern p

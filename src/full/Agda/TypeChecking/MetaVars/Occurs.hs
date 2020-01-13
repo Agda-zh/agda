@@ -366,6 +366,9 @@ instance Occurs Term where
           -- Don't fail on blocked terms or metas
           -- Blocked _ MetaV{} -> id  -- does not help with issue #856
           Blocked{}    -> flexibly
+          -- Re #3594, do not fail hard when Underapplied:
+          -- the occurrence could be computed away after eta expansion.
+          NotBlocked{blockingStatus = Underapplied} -> flexibly
           NotBlocked{} -> id
     v <- return $ ignoreBlocking vb
     flexIfBlocked $ do
@@ -545,8 +548,9 @@ instance Occurs Sort where
       PiSort a s2 -> do
         s1' <- flexibly $ occurs $ getSort a
         a'  <- (a $>) . El s1' <$> do flexibly $ occurs $ unEl $ unDom a
-        s2' <- mapAbstraction a' (flexibly . occurs) s2
+        s2' <- mapAbstraction a' (flexibly . underBinder . occurs) s2
         return $ PiSort a' s2'
+      FunSort s1 s2 -> FunSort <$> flexibly (occurs s1) <*> flexibly (occurs s2)
       Type a     -> Type <$> occurs a
       Prop a     -> Prop <$> occurs a
       s@Inf      -> return s
@@ -564,6 +568,7 @@ instance Occurs Sort where
     s <- instantiate s
     case s of
       PiSort a s -> metaOccurs m (a,s)
+      FunSort s1 s2 -> metaOccurs m (s1,s2)
       Type a     -> metaOccurs m a
       Prop a     -> metaOccurs m a
       Inf        -> return ()
@@ -774,6 +779,7 @@ instance AnyRigid Sort where
       Inf        -> return False
       SizeUniv   -> return False
       PiSort a s -> return False
+      FunSort s1 s2 -> return False
       UnivSort s -> anyRigid f s
       MetaS{}    -> return False
       DefS{}     -> return False
@@ -968,10 +974,14 @@ performKill kills m a = do
   -- (de Bruijn level order).
   let perm = Perm n
              [ i | (i, Arg _ False) <- zip [0..] kills ]
+      -- The permutation for the old meta might range over a prefix of the arguments
+      oldPerm = liftP (max 0 $ n - m) p
+        where p = mvPermutation mv
+              m = size p
       judg = case mvJudgement mv of
         HasType{ jComparison = cmp } -> HasType __IMPOSSIBLE__ cmp a
         IsSort{}  -> IsSort  __IMPOSSIBLE__ a
-  m' <- newMeta Instantiable (mvInfo mv) (mvPriority mv) perm judg
+  m' <- newMeta Instantiable (mvInfo mv) (mvPriority mv) (composeP perm oldPerm) judg
   -- Andreas, 2010-10-15 eta expand new meta variable if necessary
   etaExpandMetaSafe m'
   let -- Arguments to new meta (de Bruijn indices)

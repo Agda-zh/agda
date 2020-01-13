@@ -132,6 +132,7 @@ quotingKit = do
       quoteSort Inf      = pure unsupportedSort
       quoteSort SizeUniv = pure unsupportedSort
       quoteSort PiSort{} = pure unsupportedSort
+      quoteSort FunSort{} = pure unsupportedSort
       quoteSort UnivSort{}   = pure unsupportedSort
       quoteSort (MetaS x es) = quoteTerm $ MetaV x es
       quoteSort (DefS d es)  = quoteTerm $ Def d es
@@ -152,7 +153,7 @@ quotingKit = do
       quotePat (VarP o x)        = varP !@! quoteString (dbPatVarName x)
       quotePat (DotP _ _)        = pure dotP
       quotePat (ConP c _ ps)     = conP !@ quoteQName (conName c) @@ quotePats ps
-      quotePat (LitP l)          = litP !@ quoteLit l
+      quotePat (LitP _ l)        = litP !@ quoteLit l
       quotePat (ProjP _ x)       = projP !@ quoteQName x
       quotePat (IApplyP o t u x) = pure unsupported
       quotePat DefP{}            = pure unsupported
@@ -172,7 +173,7 @@ quotingKit = do
       quoteList :: (a -> ReduceM Term) -> [a] -> ReduceM Term
       quoteList q xs = list (map q xs)
 
-      quoteDom :: (Type -> ReduceM Term) -> Dom Type -> ReduceM Term
+      quoteDom :: (a -> ReduceM Term) -> Dom a -> ReduceM Term
       quoteDom q Dom{domInfo = info, unDom = t} = arg !@ quoteArgInfo info @@ q t
 
       quoteAbs :: Subst t a => (a -> ReduceM Term) -> Abs a -> ReduceM Term
@@ -252,7 +253,7 @@ quotingKit = do
           Record{recConHead = c, recFields = fs} ->
             agdaDefinitionRecordDef
               !@! quoteName (conName c)
-              @@ quoteList (quoteArg (pure . quoteName)) fs
+              @@ quoteList (quoteDom (pure . quoteName)) fs
           Axiom{}       -> pure agdaDefinitionPostulate
           DataOrRecSig{} -> pure agdaDefinitionPostulate
           GeneralizableVar{} -> pure agdaDefinitionPostulate  -- TODO: reflect generalizable vars

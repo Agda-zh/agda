@@ -3,9 +3,12 @@ Agda 2
 
 [![Hackage version](https://img.shields.io/hackage/v/Agda.svg?label=Hackage)](http://hackage.haskell.org/package/Agda)
 [![Stackage version](https://www.stackage.org/package/Agda/badge/lts?label=Stackage)](https://www.stackage.org/package/Agda)
-[![Build Status](https://travis-ci.org/Agda-zh/agda.svg?branch=zh-master)](https://travis-ci.org/Agda-zh/agda)
+[![Travis Status](https://travis-ci.org/Agda-zh/agda.svg?branch=master)](https://travis-ci.org/Agda-zh/agda)
+[![Stack Build Status via GH Actions](https://github.com/Agda-zh/agda/workflows/stack%20build/badge.svg)](https://github.com/agda/agda/actions?query=workflow%3A%22stack+build%22)
 [![Appveyor Status](https://ci.appveyor.com/api/projects/status/x6liln2dol0bg4qw/branch/master?svg=true)](https://ci.appveyor.com/project/gallais/agda)
-[![Documentation Status](https://readthedocs.org/projects/agda-zh/badge/?version=latest)](https://agda-zh.readthedocs.io/zh_CN/latest/?badge=latest)
+[![Documentation Status](https://readthedocs.org/projects/agda-zh/badge/?version=latest)](http://Agda-zh.readthedocs.io/zh_CN/latest/?badge=latest) [![Join the chat at https://gitter.im/agda/agda](https://badges.gitter.im/agda/agda.svg)](https://gitter.im/agda/agda?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
+![The official Agda logo](doc/user-manual/agda.svg)
 
 Note that this README is only about Agda, not its standard
 library. See the [Agda Wiki][agdawiki] for information about the
@@ -15,6 +18,8 @@ Documentation
 -------------
 
 * [User manual](http://agda.readthedocs.io)
+  (per-commit pdf can be downloaded from the
+  [github actions](https://github.com/agda/agda/actions?query=workflow%3A%22User+Manual%22) page)
 * [CHANGELOG](https://github.com/agda/agda/blob/master/CHANGELOG.md)
 
 Getting Started

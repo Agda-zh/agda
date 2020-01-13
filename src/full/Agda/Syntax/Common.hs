@@ -1823,15 +1823,12 @@ data Access
       -- ^ Store the 'Origin' of the private block that lead to this qualifier.
       --   This is needed for more faithful printing of declarations.
   | PublicAccess
-  | OnlyQualified  -- ^ Visible from outside, but not exported when opening the module
-                             --   Used for qualified constructors.
     deriving (Data, Show, Eq, Ord)
 
 instance Pretty Access where
   pretty = text . \case
     PrivateAccess _ -> "private"
     PublicAccess    -> "public"
-    OnlyQualified   -> "only-qualified"
 
 instance NFData Access where
   rnf _ = ()
@@ -2354,3 +2351,30 @@ instance (KillRange qn, KillRange e, KillRange p) => KillRange (RewriteEqn' qn p
   killRange = \case
     Rewrite es    -> killRange1 Rewrite es
     Invert qn pes -> killRange2 Invert qn pes
+
+-----------------------------------------------------------------------------
+-- * Information on expanded ellipsis (@...@)
+-----------------------------------------------------------------------------
+
+-- ^ When the ellipsis in a clause are expanded, we remember that we
+--   did so. We also store the number of with-arguments that are
+--   included in the expanded ellipsis.
+data ExpandedEllipsis
+  = ExpandedEllipsis
+  { ellipsisRange :: Range
+  , ellipsisWithArgs :: Int
+  }
+  | NoEllipsis
+  deriving (Data, Show, Eq)
+
+instance Null ExpandedEllipsis where
+  null  = (== NoEllipsis)
+  empty = NoEllipsis
+
+instance KillRange ExpandedEllipsis where
+  killRange (ExpandedEllipsis _ k) = ExpandedEllipsis noRange k
+  killRange NoEllipsis             = NoEllipsis
+
+instance NFData ExpandedEllipsis where
+  rnf (ExpandedEllipsis _ a) = rnf a
+  rnf NoEllipsis             = ()

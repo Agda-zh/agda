@@ -108,7 +108,7 @@ isType_ e = traceCall (IsType_ e) $ do
     A.Fun i (Arg info t) b -> do
       a <- setArgInfo info . defaultDom <$> isType_ t
       b <- isType_ b
-      s <- inferFunSort a (getSort b)
+      s <- inferFunSort (getSort a) (getSort b)
       let t' = El s $ Pi a $ NoAbs underscore b
       noFunctionsIntoSize b t'
       return t'
@@ -407,37 +407,43 @@ checkLambda cmp b@(A.TBind _ _ xps typ) body target = do
 
       -- First check that argsT is a valid type
       argsT <- workOnTypes $ isType_ typ
+      let tel = namedBindsToTel xs argsT
+      reportSDoc "tc.term.lambda" 60 $ "dontUseTargetType tel =" <+> pretty tel
+
       -- Andreas, 2015-05-28 Issue 1523
       -- If argsT is a SizeLt, it must be non-empty to avoid non-termination.
       -- TODO: do we need to block checkExpr?
       checkSizeLtSat $ unEl argsT
 
-      -- In order to have as much type information as possible when checking
-      -- body, we first unify (xs : argsT) → ?t₁ with the target type. If this
-      -- is inconclusive we need to block the resulting term so we create a
-      -- fresh problem for the check.
-      let tel = namedBindsToTel xs argsT
-      reportSDoc "tc.term.lambda" 60 $ "dontUseTargetType tel =" <+> pretty tel
+      -- Jesper 2019-12-17, #4261: we need to postpone here if
+      -- checking of the record pattern fails; if we try to catch
+      -- higher up the metas created during checking of @argsT@ are
+      -- not available.
+      let postponeOnBlockedPattern m = m `catchIlltypedPatternBlockedOnMeta` \(err , x) -> do
+            reportSDoc "tc.term" 50 $ vcat $
+              [ "checking record pattern stuck on meta: " <+> text (show x) ]
+            t1 <- addContext (xs, argsT) $ workOnTypes newTypeMeta_
+            let e    = A.Lam A.exprNoRange (A.DomainFull b) body
+                tgt' = telePi tel t1
+            w <- postponeTypeCheckingProblem (CheckExpr cmp e tgt') $ isInstantiatedMeta x
+            return (tgt' , w)
+
+      -- Now check body : ?t₁
       -- DONT USE tel for addContext, as it loses NameIds.
-      -- WRONG: t1 <- addContext tel $ workOnTypes newTypeMeta_
-      t1 <- addContext (xs, argsT) $  addTypedPatterns xps $
-              workOnTypes newTypeMeta_
+      -- WRONG: v <- addContext tel $ checkExpr body t1
+      (target0 , w) <- postponeOnBlockedPattern $
+         addContext (xs, argsT) $ addTypedPatterns xps $ do
+           t1 <- workOnTypes newTypeMeta_
+           v  <- checkExpr' cmp body t1
+           return (telePi tel t1 , teleLam tel v)
+
       -- Do not coerce hidden lambdas
       if notVisible info || any notVisible xs then do
-        pid <- newProblem_ $ leqType (telePi tel t1) target
-        -- Now check body : ?t₁
-        -- WRONG: v <- addContext tel $ checkExpr body t1
-        v <- addContext (xs, argsT) $ addTypedPatterns xps $
-               checkExpr' cmp body t1
-        -- Block on the type comparison
-        blockTermOnProblem target (teleLam tel v) pid
-       else do
-        -- Now check body : ?t₁
-        -- WRONG: v <- addContext tel $ checkExpr body t1
-        v <- addContext (xs, argsT) $ addTypedPatterns xps $
-               checkExpr' cmp body t1
-        -- Block on the type comparison
-        coerce cmp (teleLam tel v) (telePi tel t1) target
+        pid <- newProblem_ $ leqType target0 target
+        blockTermOnProblem target w pid
+      else do
+        coerce cmp w target0 target
+
 
     useTargetType tel@(ExtendTel dom (Abs y EmptyTel)) btyp = do
         verboseS "tc.term.lambda" 5 $ tick "lambda-with-target-type"
@@ -635,6 +641,7 @@ checkAbsurdLambda cmp i h e t = localTC (set eQuantity topQuantity) $ do
                     , clauseType      = Just $ setModality mod $ defaultArg $ absBody b
                     , clauseCatchall  = False
                     , clauseUnreachable = Just True -- absurd clauses are unreachable
+                    , clauseEllipsis  = NoEllipsis
                     }
                   ]
               , funCompiled       = Just Fail
@@ -843,7 +850,7 @@ checkRecordExpression cmp mfs e t = do
       reportSDoc "tc.term.rec" 20 $ text $ "  r   = " ++ prettyShow r
 
       reportSDoc "tc.term.rec" 30 $ "  xs  = " <> do
-        text =<< prettyShow . map unArg <$> getRecordFieldNames r
+        text =<< prettyShow . map unDom <$> getRecordFieldNames r
       reportSDoc "tc.term.rec" 30 $ "  ftel= " <> do
         prettyTCM =<< getRecordFieldTypes r
       reportSDoc "tc.term.rec" 30 $ "  con = " <> do
@@ -851,7 +858,7 @@ checkRecordExpression cmp mfs e t = do
 
       def <- getRecordDef r
       let -- Field names (C.Name) with ArgInfo from record type definition.
-          cxs  = recordFieldNames def
+          cxs  = map argFromDom $ recordFieldNames def
           -- Just field names.
           xs   = map unArg cxs
           -- Record constructor.
@@ -865,7 +872,7 @@ checkRecordExpression cmp mfs e t = do
       -- Andreas, 2018-09-06, issue #3122.
       -- Associate the concrete record field names used in the record expression
       -- to their counterpart in the record type definition.
-      disambiguateRecordFields (map _nameFieldA $ lefts mfs) (map unArg $ recFields def)
+      disambiguateRecordFields (map _nameFieldA $ lefts mfs) (map unDom $ recFields def)
 
       -- Compute the list of given fields, decorated with the ArgInfo from the record def.
       -- Andreas, 2019-03-18, issue #3122, also pick up non-visible fields from the modules.
@@ -949,14 +956,14 @@ checkRecordUpdate cmp ei recexpr fs e t = do
       v <- checkExpr' cmp recexpr t
       name <- freshNoName (getRange recexpr)
       addLetBinding defaultArgInfo name v t $ do
-        projs <- recFields <$> getRecordDef r
+        projs <- map argFromDom . recFields <$> getRecordDef r
 
         -- Andreas, 2018-09-06, issue #3122.
         -- Associate the concrete record field names used in the record expression
         -- to their counterpart in the record type definition.
         disambiguateRecordFields (map _nameFieldA fs) (map unArg projs)
 
-        axs <- getRecordFieldNames r
+        axs <- map argFromDom <$> getRecordFieldNames r
         let xs = map unArg axs
         es <- orderFields r (\ _ -> Nothing) axs $ map (\ (FieldAssignment x e) -> (x, Just e)) fs
         let es' = zipWith (replaceFields name ei) projs es
@@ -1011,6 +1018,9 @@ checkExpr'
   -> TCM Term
 checkExpr' cmp e t =
   verboseBracket "tc.term.expr.top" 5 "checkExpr" $
+  reportResult "tc.term.expr.top" 15 (\ v -> vcat
+                                              [ "checkExpr" <?> fsep [ prettyTCM e, ":", prettyTCM t ]
+                                              , "  returns" <?> prettyTCM v ]) $
   traceCall (CheckExprCall cmp e t) $ localScope $ doExpandLast $ unfoldInlined =<< do
     reportSDoc "tc.term.expr.top" 15 $
         "Checking" <+> sep
@@ -1139,7 +1149,7 @@ checkExpr' cmp e t =
             a' <- isType_ a
             let adom = defaultArgDom info a'
             b' <- isType_ b
-            s  <- inferFunSort adom (getSort b')
+            s  <- inferFunSort (getSort a') (getSort b')
             let v = Pi adom (NoAbs underscore b')
             noFunctionsIntoSize b' $ El s v
             coerce cmp v (sort s) t
@@ -1193,9 +1203,12 @@ checkExpr' cmp e t =
         , not (hiddenLambdaOrHole h e)
         = do
       let proceed = doInsert (setOrigin Inserted info) $ absName b
+      expandHidden <- asksTC envExpandLast
       -- If we skip the lambda insertion for an introduction,
       -- we will hit a dead end, so proceed no matter what.
-      if definitelyIntroduction then proceed else do
+      if definitelyIntroduction then proceed else
+        -- #3019 and #4170: don't insert implicit lambdas in arguments to existing metas
+        if expandHidden == ReallyDontExpandLast then fallback else do
         -- Andreas, 2017-01-19, issue #2412:
         -- We do not want to insert a hidden lambda if A is
         -- possibly empty type of sizes, as this will produce an error.

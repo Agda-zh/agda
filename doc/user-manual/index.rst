@@ -9,6 +9,10 @@
 欢迎阅读 Agda 文档！
 ====================
 
+.. image:: agda.svg
+  :width: 400
+  :alt: The official Agda logo
+
 .. toctree::
    :maxdepth: 2
 

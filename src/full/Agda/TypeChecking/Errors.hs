@@ -20,6 +20,8 @@ import Prelude hiding ( null )
 
 import Data.Function
 import Data.List (sortBy, isInfixOf, dropWhileEnd)
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Maybe
 import Data.Char (toLower)
 import qualified Data.Set as Set
@@ -42,6 +44,7 @@ import Agda.TypeChecking.Monad.Closure
 import Agda.TypeChecking.Monad.Context
 import Agda.TypeChecking.Monad.Debug
 import Agda.TypeChecking.Monad.Builtin
+import Agda.TypeChecking.Monad.SizedTypes ( sizeType )
 import Agda.TypeChecking.Monad.State
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Pretty.Call
@@ -56,7 +59,6 @@ import Agda.Utils.Float  ( toStringWithoutDotZero )
 import Agda.Utils.Function
 import Agda.Utils.Maybe
 import Agda.Utils.Null
-import Agda.Utils.NonemptyList
 import Agda.Utils.Pretty ( prettyShow )
 import qualified Agda.Utils.Pretty as P
 import Agda.Utils.Size
@@ -541,11 +543,14 @@ instance PrettyTCM TypeError where
       (s            , Sort DefS{}  ) -> prettyTCM $ ShouldBeASort $ El Inf s
       (_            , _            ) -> do
         (d1, d2, d) <- prettyInEqual s t
-        fsep $ [return d1, notCmp cmp, return d2]
-          ++ (case a of
+        fsep $ concat $
+          [ [return d1, notCmp cmp, return d2]
+          , case a of
                 AsTermsOf t -> pwords "of type" ++ [prettyTCM t]
-                AsTypes     -> [])
-          ++ [return d]
+                AsSizes     -> pwords "of type" ++ [prettyTCM =<< sizeType]
+                AsTypes     -> []
+          , [return d]
+          ]
 
     UnequalLevel cmp s t -> fsep $
       [prettyTCM s, notCmp cmp, prettyTCM t]
@@ -744,14 +749,14 @@ instance PrettyTCM TypeError where
     AmbiguousName x ys -> vcat
       [ fsep $ pwords "Ambiguous name" ++ [pretty x <> "."] ++
                pwords "It could refer to any one of"
-      , nest 2 $ vcat $ map nameWithBinding (toList ys)
+      , nest 2 $ vcat $ map nameWithBinding (NonEmpty.toList ys)
       , fwords "(hint: Use C-c C-w (in Emacs) if you want to know why)"
       ]
 
     AmbiguousModule x ys -> vcat
       [ fsep $ pwords "Ambiguous module name" ++ [pretty x <> "."] ++
                pwords "It could refer to any one of"
-      , nest 2 $ vcat $ map help (toList ys)
+      , nest 2 $ vcat $ map help (NonEmpty.toList ys)
       , fwords "(hint: Use C-c C-w (in Emacs) if you want to know why)"
       ]
       where
@@ -864,11 +869,11 @@ instance PrettyTCM TypeError where
     CannotResolveAmbiguousPatternSynonym defs -> vcat
       [ fsep $ pwords "Cannot resolve overloaded pattern synonym" ++ [prettyTCM x <> comma] ++
                pwords "since candidates have different shapes:"
-      , nest 2 $ vcat $ map prDef (toList defs)
+      , nest 2 $ vcat $ map prDef (NonEmpty.toList defs)
       , fsep $ pwords "(hint: overloaded pattern synonyms must be equal up to variable and constructor names)"
       ]
       where
-        (x, _) = headNe defs
+        (x, _) = NonEmpty.head defs
         prDef (x, (xs, p)) = prettyA (A.PatternSynDef x xs p) <?> ("at" <+> pretty r)
           where r = nameBindingSite $ qnameName x
 
@@ -1128,7 +1133,7 @@ instance PrettyTCM TypeError where
     prettyPat n (I.DefP o q args) =
       mpar n args $
         prettyTCM q <+> fsep (map (prettyArg . fmap namedThing) args)
-    prettyPat _ (I.LitP l) = prettyTCM l
+    prettyPat _ (I.LitP _ l) = prettyTCM l
     prettyPat _ (I.ProjP _ p) = "." <> prettyTCM p
     prettyPat _ (I.IApplyP _ _ _ _) = "_"
 
@@ -1187,8 +1192,12 @@ instance PrettyTCM SplitError where
     IrrelevantDatatype t -> enterClosure t $ \ t -> fsep $
       pwords "Cannot split on argument of irrelevant datatype" ++ [prettyTCM t]
 
-    ErasedDatatype t -> enterClosure t $ \ t -> fsep $
-      pwords "Cannot branch on erased argument of datatype" ++ [prettyTCM t]
+    ErasedDatatype causedByWithoutK t -> enterClosure t $ \ t -> fsep $
+      pwords "Cannot branch on erased argument of datatype" ++
+      [prettyTCM t] ++
+      if causedByWithoutK
+      then pwords "because the K rule is turned off"
+      else []
 
     CoinductiveDatatype t -> enterClosure t $ \ t -> fsep $
       pwords "Cannot pattern match on the coinductive type" ++ [prettyTCM t]
@@ -1277,6 +1286,14 @@ instance PrettyTCM UnificationFailure where
       pwords "=" ++ [prettyTCM u] ++ pwords "of type" ++ [prettyTCM a] ++
       pwords "because K has been disabled."
 
+    UnifyUnusableModality tel a i u mod -> addContext tel $ fsep $
+      pwords "Cannot solve variable " ++ [prettyTCM (var i)] ++
+      pwords "of type " ++ [prettyTCM a] ++
+      pwords "with solution " ++ [prettyTCM u] ++
+      pwords "because the solution cannot be used at" ++
+             [ text (verbalize $ getRelevance mod) <> ","
+             , text $ verbalize $ getQuantity mod ] ++
+      pwords "modality"
 
 
 ---------------------------------------------------------------------------

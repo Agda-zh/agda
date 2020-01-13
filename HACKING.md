@@ -303,6 +303,26 @@ Testing and documentation
   Internal tests for a module `Agda.Foo.Bar` should reside in module
   `InternalTests.Foo.Bar`.  Same for `Arbitrary` and `CoArbitrary` instances.
 
+Testing with Travis CI and GitHub Actions
+=========================================
+Since Dec 2019.
+
+Instead of running all test suites locally, it is encouraged that you compile
+Agda and run test suites by GitHub Actions and Travis on your own GitHub fork
+when hacking Agda.
+
+Different tool chains, compilation flags, and platforms are tested. These tests
+are executed in parallel when possible for efficiency, so ideally it also saves
+you some time. One caveat:
+
+* *Travis CI* is not active by default. See:
+  https://docs.travis-ci.com/user/tutorial/
+
+  for signing up.
+
+You should see the status in your GitHub Actions page and
+the Travis dashboard page, if successful.
+
 Some Agda Hacking Lore
 ======================
 
@@ -454,28 +474,26 @@ To run `Ghci`:
 
     stack repl
 
-Closing issues
-===============
+Closed issues by milestone program
+==================================
+
+The `closed-issues-by-milestone` program requires a GitHub personal
+access token in the `GITHUBTOKEN` environment variable, i.e,
+
+    export GITHUBTOKEN=your-personal-access-token
+
+The personal access token can be generated from your GitHub user:
+
+    Settings -> Developer settings -> Personal access tokens
+
+
+Closed issues reported in the CHANGELOG
+=======================================
 
 Before releasing for example Agda 1.2.3 we add to the `CHANGELOG`
-*all* the closed issues with milestone 1.2.3 (using the
-`closed-issues-by-milestone` program) except those issues tagged
-with one of the following labels:
-`closed-issues-program`
-`debug`
-`faq`
-`fix-agda-whitespace`
-`haddock`
-`not-in-changelog`
-`repository`
-`status: abandoned`
-`status: duplicate`
-`status: invalid`
-`status: wontfix`
-`status: working-as-intended`
-`style`
-`type: task`
-`typo`
+*all* the closed issues with milestone 1.2.3 except those issues
+tagged with the labels listed in `labelsNotInChangelog` in the
+`src/release-tools/closed-issues-for-milestone/Main.hs` file.
 
 Documentation
 =============

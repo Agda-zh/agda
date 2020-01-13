@@ -55,6 +55,10 @@ instance HasBuiltins m => HasBuiltins (StateT s m) where
 instance (HasBuiltins m, Monoid w) => HasBuiltins (WriterT w m) where
   getBuiltinThing b = lift $ getBuiltinThing b
 
+-- If Agda is changed so that the type of a literal can belong to an
+-- inductive family (with at least one index), then the implementation
+-- of split' in Agda.TypeChecking.Coverage should be changed.
+
 litType
   :: (HasBuiltins m, MonadError TCErr m, MonadTCEnv m, ReadTCState m)
   => Literal -> m Type
@@ -213,7 +217,6 @@ primInteger, primIntegerPos, primIntegerNegSuc,
     primAgdaTCMBlockOnMeta, primAgdaTCMCommit, primAgdaTCMIsMacro,
     primAgdaTCMWithNormalisation, primAgdaTCMDebugPrint,
     primAgdaTCMNoConstraints,
-    primAgdaTCMSolveConstraints, primAgdaTCMSolveConstraintsMentioning,
     primAgdaTCMRunSpeculative
     :: (HasBuiltins m, MonadError TCErr m, MonadTCEnv m, ReadTCState m) => m Term
 
@@ -392,8 +395,6 @@ primAgdaTCMIsMacro                    = getBuiltin builtinAgdaTCMIsMacro
 primAgdaTCMWithNormalisation          = getBuiltin builtinAgdaTCMWithNormalisation
 primAgdaTCMDebugPrint                 = getBuiltin builtinAgdaTCMDebugPrint
 primAgdaTCMNoConstraints              = getBuiltin builtinAgdaTCMNoConstraints
-primAgdaTCMSolveConstraints           = getBuiltin builtinAgdaTCMSolveConstraints
-primAgdaTCMSolveConstraintsMentioning = getBuiltin builtinAgdaTCMSolveConstraintsMentioning
 primAgdaTCMRunSpeculative             = getBuiltin builtinAgdaTCMRunSpeculative
 
 -- | The coinductive primitives.

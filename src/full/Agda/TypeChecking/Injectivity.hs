@@ -358,7 +358,7 @@ invertFunction cmp blk (Inv f blkArgs hdMap) hd fallback err success = do
           compareElims pol fs fTy (Def f []) margs blkArgs'
 
           -- Check that we made progress.
-          r <- liftReduce $ unfoldDefinitionStep False blk f blkArgs
+          r <- liftReduce $ unfoldDefinitionStep False (Def f []) f blkArgs
           case r of
             YesReduction _ blk' -> do
               reportSDoc "tc.inj.invert.success" 20 $ hsep ["Successful inversion of", prettyTCM f, "at", pretty hd]
@@ -400,7 +400,7 @@ invertFunction cmp blk (Inv f blkArgs hdMap) hd fallback err success = do
     metaPat (IApplyP{})      = nextMeta
     metaPat (ConP c mt args) = Con c (fromConPatternInfo mt) . map Apply <$> metaArgs args
     metaPat (DefP o q args)  = Def q . map Apply <$> metaArgs args
-    metaPat (LitP l)         = return $ Lit l
+    metaPat (LitP _ l)       = return $ Lit l
     metaPat ProjP{}          = __IMPOSSIBLE__
 
 forcePiUsingInjectivity :: Type -> TCM Type

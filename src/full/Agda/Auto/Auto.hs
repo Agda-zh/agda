@@ -108,7 +108,7 @@ auto
   -> Range
   -> String
   -> tcm AutoResult
-auto ii rng argstr = liftTCM $ do
+auto ii rng argstr = liftTCM $ locallyTC eMakeCase (const True) $ do
 
   -- Parse hints and other configuration.
   let autoOptions = parseArgs argstr
@@ -319,7 +319,8 @@ auto ii rng argstr = liftTCM $ do
                   loop [] = return $ AutoResult (Solutions []) (Just "")
                   loop (term : terms') = do
                     -- On exception, try next solution
-                    flip catchError (const $ loop terms') $ do
+                    flip catchError (\ e -> do reportSDoc "auto" 40 $ "Solution failed:" TCM.<?> TCM.prettyTCM e
+                                               loop terms') $ do
                       exprs <- getsols term
                       reportSDoc "auto" 20 $ "Trying solution " TCM.<+> TCM.prettyTCM exprs
                       giveress <- forM exprs $ \ (mi, expr0) -> do
@@ -375,12 +376,12 @@ auto ii rng argstr = liftTCM $ do
             case cls' of
              Left{} -> stopWithMsg "No solution found"
              Right cls' -> do
-              cls'' <- forM cls' $ \ (I.Clause _ _ tel ps body t catchall reachable) -> do
+              cls'' <- forM cls' $ \ (I.Clause _ _ tel ps body t catchall reachable ell) -> do
                 withCurrentModule (AN.qnameModule def) $ do
                  -- Normalise the dot patterns
                  ps <- addContext tel $ normalise ps
                  body <- etaContract body
-                 liftM modifyAbstractClause $ inTopContext $ reify $ AN.QNamed def $ I.Clause noRange noRange tel ps body t catchall reachable
+                 liftM modifyAbstractClause $ inTopContext $ reify $ AN.QNamed def $ I.Clause noRange noRange tel ps body t catchall reachable ell
               moduleTel <- lookupSection (AN.qnameModule def)
               pcs <- withInteractionId ii $ inTopContext $ addContext moduleTel $ mapM prettyA cls''
               ticks <- liftIO $ readIORef ticks

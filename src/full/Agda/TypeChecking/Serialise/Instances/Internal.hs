@@ -142,9 +142,10 @@ instance EmbPrj I.Sort where
   icod_ SizeUniv    = icodeN 2 SizeUniv
   icod_ Inf         = icodeN 3 Inf
   icod_ (PiSort a b) = icodeN 4 PiSort a b
-  icod_ (UnivSort a) = icodeN 5 UnivSort a
+  icod_ (FunSort a b) = icodeN 5 FunSort a b
+  icod_ (UnivSort a) = icodeN 6 UnivSort a
   icod_ (MetaS a b)  = __IMPOSSIBLE__
-  icod_ (DefS a b)   = icodeN 6 DefS a b
+  icod_ (DefS a b)   = icodeN 7 DefS a b
   icod_ (DummyS s)   = do
     liftIO $ putStrLn $ "Dummy sort in serialization: " ++ s
     __IMPOSSIBLE__
@@ -155,8 +156,9 @@ instance EmbPrj I.Sort where
     valu [2]       = valuN SizeUniv
     valu [3]       = valuN Inf
     valu [4, a, b] = valuN PiSort a b
-    valu [5, a]    = valuN UnivSort a
-    valu [6, a, b] = valuN DefS a b
+    valu [5, a, b] = valuN FunSort a b
+    valu [6, a]    = valuN UnivSort a
+    valu [7, a, b] = valuN DefS a b
     valu _         = malformed
 
 instance EmbPrj DisplayForm where
@@ -197,9 +199,30 @@ instance EmbPrj CompKit where
   value = valueN CompKit
 
 instance EmbPrj Definition where
-  icod_ (Defn a b c d e f g h i j k l m n o p q) = icodeN' Defn a b (P.killRange c) d e f g h i j k l m n o p q
+  icod_ (Defn a b c d e f g h i j k l m n o p q r) = icodeN' Defn a b (P.killRange c) d e f g h i j k l m n o p q r
 
   value = valueN Defn
+
+instance EmbPrj NotBlocked where
+  icod_ ReallyNotBlocked = icodeN' ReallyNotBlocked
+  icod_ (StuckOn a)      = icodeN 0 StuckOn a
+  icod_ Underapplied     = icodeN 1 Underapplied
+  icod_ AbsurdMatch      = icodeN 2 AbsurdMatch
+  icod_ MissingClauses   = icodeN 3 MissingClauses
+
+  value = vcase valu where
+    valu []     = valuN ReallyNotBlocked
+    valu [0, a] = valuN StuckOn a
+    valu [1]    = valuN Underapplied
+    valu [2]    = valuN AbsurdMatch
+    valu [3]    = valuN MissingClauses
+    valu _      = malformed
+
+instance EmbPrj Blocked_ where
+  icod_ (NotBlocked a b) = icodeN' NotBlocked a b
+  icod_ Blocked{} = __IMPOSSIBLE__
+
+  value = valueN NotBlocked
 
 instance EmbPrj NLPat where
   icod_ (PVar a b)      = icodeN 0 PVar a b
@@ -330,7 +353,7 @@ instance EmbPrj Defn where
   icod_ (Function    a b s t (_:_) c d e f g h i j k)   = __IMPOSSIBLE__
   icod_ (Function    a b s t []    c d e f g h i j k)   =
     icodeN 1 (\ a b s -> Function a b s t []) a b s c d e f g h i j k
-  icod_ (Datatype    a b c d e f g h i)                 = icodeN 2 Datatype a b c d e f g h i
+  icod_ (Datatype    a b c d e f g h)                   = icodeN 2 Datatype a b c d e f g h
   icod_ (Record      a b c d e f g h i j k)             = icodeN 3 Record a b c d e f g h i j k
   icod_ (Constructor a b c d e f g h i j)               = icodeN 4 Constructor a b c d e f g h i j
   icod_ (Primitive   a b c d e)                         = icodeN 5 Primitive a b c d e
@@ -341,12 +364,21 @@ instance EmbPrj Defn where
   value = vcase valu where
     valu [0]                                        = valuN Axiom
     valu [1, a, b, s, c, d, e, f, g, h, i, j, k]    = valuN (\ a b s -> Function a b s Nothing []) a b s c d e f g h i j k
-    valu [2, a, b, c, d, e, f, g, h, i]             = valuN Datatype a b c d e f g h i
+    valu [2, a, b, c, d, e, f, g, h]                = valuN Datatype a b c d e f g h
     valu [3, a, b, c, d, e, f, g, h, i, j, k]       = valuN Record  a b c d e f g h i j k
     valu [4, a, b, c, d, e, f, g, h, i, j]          = valuN Constructor a b c d e f g h i j
     valu [5, a, b, c, d, e]                         = valuN Primitive   a b c d e
     valu [6]                                        = valuN GeneralizableVar
     valu _                                          = malformed
+
+instance EmbPrj LazySplit where
+  icod_ StrictSplit = icodeN' StrictSplit
+  icod_ LazySplit   = icodeN 0 LazySplit
+
+  value = vcase valu where
+    valu []  = valuN StrictSplit
+    valu [0] = valuN LazySplit
+    valu _   = malformed
 
 instance EmbPrj SplitTag where
   icod_ (SplitCon c)  = icodeN 0 SplitCon c
@@ -361,12 +393,12 @@ instance EmbPrj SplitTag where
 
 instance EmbPrj a => EmbPrj (SplitTree' a) where
   icod_ (SplittingDone a) = icodeN' SplittingDone a
-  icod_ (SplitAt a b)     = icodeN 0 SplitAt a b
+  icod_ (SplitAt a b c)   = icodeN 0 SplitAt a b c
 
   value = vcase valu where
-    valu [a]       = valuN SplittingDone a
-    valu [0, a, b] = valuN SplitAt a b
-    valu _         = malformed
+    valu [a]          = valuN SplittingDone a
+    valu [0, a, b, c] = valuN SplitAt a b c
+    valu _            = malformed
 
 instance EmbPrj FunctionFlag where
   icod_ FunStatic       = icodeN 0 FunStatic
@@ -425,12 +457,12 @@ instance EmbPrj TermHead where
     valu _      = malformed
 
 instance EmbPrj I.Clause where
-  icod_ (Clause a b c d e f g h) = icodeN' Clause a b c d e f g h
+  icod_ (Clause a b c d e f g h i) = icodeN' Clause a b c d e f g h i
 
   value = valueN Clause
 
 instance EmbPrj I.ConPatternInfo where
-  icod_ (ConPatternInfo a b c d) = icodeN' ConPatternInfo a b c d
+  icod_ (ConPatternInfo a b c d e) = icodeN' ConPatternInfo a b c d e
 
   value = valueN ConPatternInfo
 
@@ -438,6 +470,11 @@ instance EmbPrj I.DBPatVar where
   icod_ (DBPatVar a b) = icodeN' DBPatVar a b
 
   value = valueN DBPatVar
+
+instance EmbPrj I.PatternInfo where
+  icod_ (PatternInfo a b) = icodeN' PatternInfo a b
+
+  value = valueN PatternInfo
 
 instance EmbPrj I.PatOrigin where
   icod_ PatOSystem  = icodeN' PatOSystem
@@ -465,7 +502,7 @@ instance EmbPrj I.PatOrigin where
 instance EmbPrj a => EmbPrj (I.Pattern' a) where
   icod_ (VarP a b  ) = icodeN 0 VarP a b
   icod_ (ConP a b c) = icodeN 1 ConP a b c
-  icod_ (LitP a    ) = icodeN 2 LitP a
+  icod_ (LitP a b  ) = icodeN 2 LitP a b
   icod_ (DotP a b  ) = icodeN 3 DotP a b
   icod_ (ProjP a b ) = icodeN 4 ProjP a b
   icod_ (IApplyP a b c d) = icodeN 5 IApplyP a b c d
@@ -474,7 +511,7 @@ instance EmbPrj a => EmbPrj (I.Pattern' a) where
   value = vcase valu where
     valu [0, a, b] = valuN VarP a b
     valu [1, a, b, c] = valuN ConP a b c
-    valu [2, a]    = valuN LitP a
+    valu [2, a, b] = valuN LitP a b
     valu [3, a, b] = valuN DotP a b
     valu [4, a, b] = valuN ProjP a b
     valu [5, a, b, c, d] = valuN IApplyP a b c d

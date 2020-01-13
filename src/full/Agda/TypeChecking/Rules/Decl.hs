@@ -206,13 +206,15 @@ checkDecl d = setCurrentRange d $ do
       -- Syntax highlighting.
       highlight_ DontHightlightModuleContents d
 
+      -- Defaulting of levels (only when --cumulativity)
+      whenM (optCumulativity <$> pragmaOptions) $ defaultLevelsToZero metas
+
       -- Post-typing checks.
       whenJust finalChecks $ \ theMutualChecks -> do
         reportSLn "tc.decl" 20 $ "Attempting to solve constraints before freezing."
         wakeupConstraints_   -- solve emptiness and instance constraints
         checkingWhere <- asksTC envCheckingWhere
         solveSizeConstraints $ if checkingWhere then DontDefaultToInfty else DefaultToInfty
-        whenM (optCumulativity <$> pragmaOptions) $ defaultOpenLevelsToZero
         wakeupConstraints_   -- Size solver might have unblocked some constraints
         case d of
             A.Generalize{} -> pure ()
@@ -320,12 +322,12 @@ revisitRecordPatternTranslation qs = do
 
 type FinalChecks = Maybe (TCM ())
 
-checkUnquoteDecl :: Info.MutualInfo -> [Info.DefInfo] -> [QName] -> A.Expr -> TCM FinalChecks
+checkUnquoteDecl :: Info.MutualInfo -> [A.DefInfo] -> [QName] -> A.Expr -> TCM FinalChecks
 checkUnquoteDecl mi is xs e = do
   reportSDoc "tc.unquote.decl" 20 $ "Checking unquoteDecl" <+> sep (map prettyTCM xs)
   Nothing <$ unquoteTop xs e
 
-checkUnquoteDef :: [Info.DefInfo] -> [QName] -> A.Expr -> TCM ()
+checkUnquoteDef :: [A.DefInfo] -> [QName] -> A.Expr -> TCM ()
 checkUnquoteDef _ xs e = do
   reportSDoc "tc.unquote.decl" 20 $ "Checking unquoteDef" <+> sep (map prettyTCM xs)
   () <$ unquoteTop xs e
@@ -514,11 +516,13 @@ checkProjectionLikeness_ names = Bench.billTo [Bench.ProjectionLikeness] $ do
                "mutual definitions are not considered for projection-likeness"
 
 -- | Freeze metas created by given computation if in abstract mode.
-whenAbstractFreezeMetasAfter :: Info.DefInfo -> TCM a -> TCM a
+whenAbstractFreezeMetasAfter :: A.DefInfo -> TCM a -> TCM a
 whenAbstractFreezeMetasAfter Info.DefInfo{ defAccess, defAbstract} m = do
   let pubAbs = defAccess == PublicAccess && defAbstract == AbstractDef
   if not pubAbs then m else do
     (a, ms) <- metasCreatedBy m
+    reportSLn "tc.decl" 20 $ "Attempting to solve constraints before freezing."
+    wakeupConstraints_   -- solve emptiness and instance constraints
     xs <- freezeMetas' $ (`IntSet.member` ms) . metaId
     reportSDoc "tc.decl.ax" 20 $ vcat
       [ "Abstract type signature produced new metas: " <+> sep (map prettyTCM $ IntSet.toList ms)
@@ -526,8 +530,13 @@ whenAbstractFreezeMetasAfter Info.DefInfo{ defAccess, defAbstract} m = do
       ]
     return a
 
-checkGeneralize :: Set QName -> Info.DefInfo -> ArgInfo -> QName -> A.Expr -> TCM ()
+checkGeneralize :: Set QName -> A.DefInfo -> ArgInfo -> QName -> A.Expr -> TCM ()
 checkGeneralize s i info x e = do
+
+    reportSDoc "tc.decl.gen" 20 $ sep
+      [ "checking type signature of generalizable variable" <+> prettyTCM x <+> ":"
+      , nest 2 $ prettyTCM e
+      ]
 
     -- Check the signature and collect the created metas.
     (telNames, tGen) <-
@@ -545,21 +554,21 @@ checkGeneralize s i info x e = do
 
 
 -- | Type check an axiom.
-checkAxiom :: A.Axiom -> Info.DefInfo -> ArgInfo ->
+checkAxiom :: A.Axiom -> A.DefInfo -> ArgInfo ->
               Maybe [Occurrence] -> QName -> A.Expr -> TCM ()
 checkAxiom = checkAxiom' Nothing
 
 -- | Data and record type signatures need to remember the generalized
 --   parameters for when checking the corresponding definition, so for these we
 --   pass in the parameter telescope separately.
-checkAxiom' :: Maybe A.GeneralizeTelescope -> A.Axiom -> Info.DefInfo -> ArgInfo ->
+checkAxiom' :: Maybe A.GeneralizeTelescope -> A.Axiom -> A.DefInfo -> ArgInfo ->
                Maybe [Occurrence] -> QName -> A.Expr -> TCM ()
-checkAxiom' gentel funSig i info0 mp x e = whenAbstractFreezeMetasAfter i $ do
+checkAxiom' gentel funSig i info0 mp x e = whenAbstractFreezeMetasAfter i $ defaultOpenLevelsToZero $ do
   -- Andreas, 2016-07-19 issues #418 #2102:
   -- We freeze metas in type signatures of abstract definitions, to prevent
   -- leakage of implementation details.
 
-  -- Andreas, 2012-04-18  if we are in irrelevant context, axioms is irrelevant
+  -- Andreas, 2012-04-18  if we are in irrelevant context, axioms are irrelevant
   -- even if not declared as such (Issue 610).
   -- Andreas, 2019-06-17  also for erasure (issue #3855).
   rel <- max (getRelevance info0) <$> asksTC getRelevance
@@ -573,6 +582,13 @@ checkAxiom' gentel funSig i info0 mp x e = whenAbstractFreezeMetasAfter i $ do
   let mod  = Modality rel q c
   let info = setModality mod info0
   applyCohesionToContext c $ do
+
+  reportSDoc "tc.decl.ax" 20 $ sep
+    [ text $ "checking type signature"
+    , nest 2 $ (prettyTCM mod <> prettyTCM x) <+> ":" <+> prettyTCM e
+    , nest 2 $ caseMaybe gentel "(no gentel)" $ \ _ -> "(has gentel)"
+    ]
+
   (genParams, npars, t) <- workOnTypes $ case gentel of
         Nothing     -> ([], 0,) <$> isType_ e
         Just gentel ->
@@ -614,6 +630,12 @@ checkAxiom' gentel funSig i info0 mp x e = whenAbstractFreezeMetasAfter i $ do
         prettyShow occs ++ "\n  " ++ prettyShow pols
       return (occs, pols)
 
+
+  -- Set blocking tag to MissingClauses if we still expect clauses
+  let blk = case funSig of
+        A.FunSig{}   -> NotBlocked MissingClauses   ()
+        A.NoFunSig{} -> NotBlocked ReallyNotBlocked ()
+
   -- Not safe. See Issue 330
   -- t <- addForcingAnnotations t
   addConstant x =<< do
@@ -626,6 +648,7 @@ checkAxiom' gentel funSig i info0 mp x e = whenAbstractFreezeMetasAfter i $ do
         { defArgOccurrences    = occs
         , defPolarity          = pols
         , defGeneralizedParams = genParams
+        , defBlocked           = blk
         }
 
   -- Add the definition to the instance table, if needed
@@ -636,11 +659,10 @@ checkAxiom' gentel funSig i info0 mp x e = whenAbstractFreezeMetasAfter i $ do
     -- Andreas, 2016-06-21, issue #2054
     -- Do not default size metas to ∞ in local type signatures
     checkingWhere <- asksTC envCheckingWhere
-    whenM (optCumulativity <$> pragmaOptions) $ defaultOpenLevelsToZero
     solveSizeConstraints $ if checkingWhere then DontDefaultToInfty else DefaultToInfty
 
 -- | Type check a primitive function declaration.
-checkPrimitive :: Info.DefInfo -> QName -> A.Expr -> TCM ()
+checkPrimitive :: A.DefInfo -> QName -> A.Expr -> TCM ()
 checkPrimitive i x e =
     traceCall (CheckPrimitive (getRange i) x e) $ do
     (name, PrimImpl t' pf) <- lookupPrimitiveFunctionQ x
@@ -678,7 +700,7 @@ checkPragma r p =
     traceCall (CheckPragma r p) $ case p of
         A.BuiltinPragma x e -> bindBuiltin x e
         A.BuiltinNoDefPragma b x -> bindBuiltinNoDef b x
-        A.RewritePragma q -> addRewriteRule q
+        A.RewritePragma qs -> addRewriteRules qs
         A.CompilePragma b x s -> do
           -- Check that x resides in the same module (or a child) as the pragma.
           x' <- defName <$> getConstInfo x  -- Get the canonical name of x.
@@ -718,7 +740,7 @@ checkPragma r p =
 -- All definitions which have so far been assigned to the given mutual
 -- block are returned.
 checkMutual :: Info.MutualInfo -> [A.Declaration] -> TCM (MutualId, Set QName)
-checkMutual i ds = inMutualBlock $ \ blockId -> do
+checkMutual i ds = inMutualBlock $ \ blockId -> defaultOpenLevelsToZero $ do
 
   reportSDoc "tc.decl.mutual" 20 $ vcat $
       (("Checking mutual block" <+> text (show blockId)) <> ":") :
@@ -748,7 +770,6 @@ checkTypeSignature' gtel (A.Axiom funSig i info mp x e) =
               -- Issue #2321, only go to AbstractMode for abstract definitions
             | otherwise -> inConcreteMode
           PublicAccess  -> inConcreteMode
-          OnlyQualified -> __IMPOSSIBLE__
     in abstr $ checkAxiom' gtel funSig i info mp x e
 checkTypeSignature' _ _ =
   __IMPOSSIBLE__   -- type signatures are always axioms
@@ -854,11 +875,11 @@ checkSectionApplication' i m1 (A.SectionApp ptel m2 args) copyInfo = do
     reportSDoc "tc.mod.apply" 15 $ vcat
       [ "applying section" <+> prettyTCM m2
       , nest 2 $ "args =" <+> sep (map prettyA args)
-      , nest 2 $ "ptel =" <+> escapeContext (size ptel) (prettyTCM ptel)
+      , nest 2 $ "ptel =" <+> unsafeEscapeContext (size ptel) (prettyTCM ptel)
       , nest 2 $ "tel  =" <+> prettyTCM tel
       , nest 2 $ "tel' =" <+> prettyTCM tel'
       , nest 2 $ "tel''=" <+> prettyTCM tel''
-      , nest 2 $ "eta  =" <+> escapeContext (size ptel) (addContext tel'' $ prettyTCM etaTel)
+      , nest 2 $ "eta  =" <+> unsafeEscapeContext (size ptel) (addContext tel'' $ prettyTCM etaTel)
       ]
     -- Now, type check arguments.
     ts <- (noConstraints $ checkArguments_ DontExpandLast (getRange i) args tel') >>= \case

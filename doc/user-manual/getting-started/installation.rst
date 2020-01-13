@@ -363,30 +363,37 @@ OS X
 
 .. When installing Agda the following flags can be used:
 
-.. :samp:`cpphs`
-..    Use `cpphs <https://hackage.haskell.org/package/cpphs>`_ instead of
-..    cpp. Default: off.
+.. .. option:: cpphs
 
-.. :samp:`debug`
-..    Enable debugging features that may slow Agda down. Default: off.
+..      Use `cpphs <https://hackage.haskell.org/package/cpphs>`_ instead
+..      of cpp. Default: off.
 
-.. :samp:`flag enable-cluster-counting`
-..    Enable the ``--count-clusters`` flag (see
-..    :ref:`grapheme-clusters`). Note that if ``enable-cluster-counting``
-..    is ``False``, then the ``--count-clusters`` flag triggers an error
-..    message. Default: off.
+.. .. option:: debug
+
+..      Enable debugging features that may slow Agda down. Default: off.
+
+.. .. option:: enable-cluster-counting
+
+..      Enable the :option:`--count-clusters` flag. Note that if
+..      ``enable-cluster-counting`` is ``False``, then the
+..      :option:`--count-clusters` flag triggers an error
+..      message. Default: off.
 
 在安装 Agda 时可指定以下命令行选项：
 
-:samp:`cpphs`
-   使用 `cpphs <https://hackage.haskell.org/package/cpphs>`_ 代替 cpp。默认关闭。
+.. option:: cpphs
 
-:samp:`debug`
-   开启调试特性可能会减慢 Agda 的速度。默认关闭。
+     使用 `cpphs <https://hackage.haskell.org/package/cpphs>`_ 代替 cpp。默认关闭。
 
-:samp:`flag enable-cluster-counting`
-   开启 ``--count-clusters`` 选项（见 :ref:`grapheme-clusters`）。注意若
-   ``enable-cluster-counting`` 为 ``False``，那么 ``--count-clusters`` 选项会触发一条错误信息。
-   默认关闭。
+.. option:: debug
+
+     开启调试特性可能会减慢 Agda 的速度。默认关闭。
+
+.. option:: enable-cluster-counting
+
+     开启 :option:`--count-clusters` 选项。注意若
+     ``enable-cluster-counting`` 为 ``False``，那么
+     :option:`--count-clusters` 选项会触发一条错误信息。
+     默认关闭。
 
 .. _exec-path-from-shell: https://github.com/purcell/exec-path-from-shell

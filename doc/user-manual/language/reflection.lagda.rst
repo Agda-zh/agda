@@ -2,8 +2,20 @@
   ::
   module language.reflection where
 
-  open import language.built-ins
   open import Agda.Builtin.Sigma
+  open import Agda.Builtin.Unit
+  open import Agda.Builtin.Nat
+  open import Agda.Builtin.List
+  open import Agda.Builtin.Float
+  open import Agda.Builtin.Bool
+  open import Agda.Builtin.Char
+  open import Agda.Builtin.String
+  open import Agda.Builtin.Word
+  open import Agda.Builtin.Equality
+
+  data ⊥ : Set where
+
+  pattern [_] x = x ∷ []
 
   ¬_ : ∀ {u} → Set u → Set u
   ¬ x  = x → ⊥
@@ -66,8 +78,9 @@ The fixity of a name can also be retrived.
   primitive
     primQNameFixity    : Name → Fixity
 
-To define a decidable propositional equality with the option ``--safe``,
-one can use the conversion to a pair of built-in 64-bit machine words
+To define a decidable propositional equality with the option
+:option:`--safe`, one can use the conversion to a pair of built-in
+64-bit machine words
 
 ::
 
@@ -117,7 +130,8 @@ of ``primMetaToNat``
   primitive
     primMetaToNatInjective : ∀ a b → primMetaToNat a ≡ primMetaToNat b → a ≡ b
 
-which can be used to define a decidable propositional equality with the option ``--safe``.
+which can be used to define a decidable propositional equality with
+the option :option:`--safe`.
 
 Literals
 ~~~~~~~~
@@ -441,13 +455,6 @@ following primitive operations::
     -- "blocking" constraints.
     noConstraints : ∀ {a} {A : Set a} → TC A → TC A
 
-    -- Tries to solve all constraints.
-    solveConstraints : TC ⊤
-
-    -- Wakes up all constraints mentioning the given meta-variables,
-    -- and then tries to solve all awake constraints.
-    solveConstraintsMentioning : List Meta → TC ⊤
-
     -- Run the given TC action and return the first component. Resets to
     -- the old TC state if the second component is 'false', or keep the
     -- new TC state if it is 'true'.
@@ -477,8 +484,6 @@ following primitive operations::
   {-# BUILTIN AGDATCMWITHNORMALISATION          withNormalisation          #-}
   {-# BUILTIN AGDATCMDEBUGPRINT                 debugPrint                 #-}
   {-# BUILTIN AGDATCMNOCONSTRAINTS              noConstraints              #-}
-  {-# BUILTIN AGDATCMSOLVECONSTRAINTS           solveConstraints           #-}
-  {-# BUILTIN AGDATCMSOLVECONSTRAINTSMENTIONING solveConstraintsMentioning #-}
   {-# BUILTIN AGDATCMRUNSPECULATIVE             runSpeculative             #-}
 
 Metaprogramming
@@ -618,6 +623,25 @@ For instance,
 
   test-g : g 4 ≡ 8
   test-g = refl
+
+Record fields can also be annotated with a tactic, allowing them to be
+omitted in constructor applications, record constructions and co-pattern
+matches::
+
+  record Bools : Set where
+    constructor mkBools
+    field fst : Bool
+          @(tactic defaultTo fst) {snd} : Bool
+  open Bools
+
+  tt₀ tt₁ tt₂ tt₃ : Bools
+  tt₀ = mkBools true {true}
+  tt₁ = mkBools true
+  tt₂ = record{ fst = true }
+  tt₃ .fst = true
+
+  test-tt : tt₁ ∷ tt₂ ∷ tt₃ ∷ [] ≡ tt₀ ∷ tt₀ ∷ tt₀ ∷ []
+  test-tt = refl
 
 Unquoting Declarations
 ~~~~~~~~~~~~~~~~~~~~~~

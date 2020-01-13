@@ -262,9 +262,11 @@ instance PrettyTCM Modality where
     ]
 
 instance PrettyTCM ProblemConstraint where
-  prettyTCM (PConstr pids c)
-    | Set.null pids = prettyTCM c
-    | otherwise     = prettyList (map prettyTCM $ Set.toList pids) <+> prettyTCM c
+  prettyTCM (PConstr pids c) = prettyTCM c <?> prPids (Set.toList pids)
+    where
+      prPids []    = empty
+      prPids [pid] = parens $ "problem" <+> prettyTCM pid
+      prPids pids  = parens $ "problems" <+> fsep (punctuate "," $ map prettyTCM pids)
 
 instance PrettyTCM Constraint where
     prettyTCM c = case c of
@@ -275,10 +277,9 @@ instance PrettyTCM Constraint where
             <?> (":" <+> prettyTCMCtx TopCtx ty)
         ElimCmp cmps fs t v us vs -> prettyCmp "~~" us vs   <?> (":" <+> prettyTCMCtx TopCtx t)
         LevelCmp cmp a b         -> prettyCmp (prettyTCM cmp) a b
-        TypeCmp cmp a b          -> prettyCmp (prettyTCM cmp) a b
         TelCmp a b cmp tela telb -> prettyCmp (prettyTCM cmp) tela telb
         SortCmp cmp s1 s2        -> prettyCmp (prettyTCM cmp) s1 s2
-        Guarded c pid            -> prettyTCM c <?> (brackets $ "blocked on problem" <+> prettyTCM pid)
+        Guarded c pid            -> prettyTCM c <?> (parens $ "blocked by problem" <+> prettyTCM pid)
         UnBlock m   -> do
             -- BlockedConst t <- mvInstantiation <$> lookupMeta m
             mi <- mvInstantiation <$> lookupMeta m
@@ -347,6 +348,7 @@ instance PrettyTCM Constraint where
 
 instance PrettyTCM CompareAs where
   prettyTCM (AsTermsOf a) = ":" <+> prettyTCMCtx TopCtx a
+  prettyTCM AsSizes       = ":" <+> do prettyTCM =<< sizeType
   prettyTCM AsTypes       = empty
 
 instance PrettyTCM TypeCheckingProblem where
@@ -412,7 +414,7 @@ instance PrettyTCM a => PrettyTCM (Pattern' a) where
   prettyTCM (ConP c i ps) = (if b then braces else parens) $ prTy $
         prettyTCM c <+> fsep (map (prettyTCM . namedArg) ps)
         where
-        b = maybe False (/= PatOCon) $ conPRecord i
+        b = conPRecord i && patOrigin (conPInfo i) /= PatOCon
         showRec :: MonadPretty m => m Doc
         showRec = sep
           [ "record"
@@ -424,7 +426,7 @@ instance PrettyTCM a => PrettyTCM (Pattern' a) where
         showCon :: MonadPretty m => m Doc
         showCon = parens $ prTy $ prettyTCM c <+> fsep (map (prettyTCM . namedArg) ps)
         prTy d = d -- caseMaybe (conPType i) d $ \ t -> d  <+> ":" <+> prettyTCM t
-  prettyTCM (LitP l)      = text (P.prettyShow l)
+  prettyTCM (LitP _ l)    = text (P.prettyShow l)
   prettyTCM (ProjP _ q)   = text ("." ++ P.prettyShow q)
 
 -- | Proper pretty printing of patterns:

@@ -347,8 +347,9 @@ termFunction name = do
   let index = fromMaybe __IMPOSSIBLE__ $ List.elemIndex name allNames
 
   -- Retrieve the target type of the function to check.
-
-  target <- liftTCM $ do typeEndsInDef =<< typeOfConst name
+  -- #4256: Don't use typeOfConst (which instantiates type with module params), since termination
+  -- checking is running in the empty context, but with the current module unchanged.
+  target <- liftTCM $ do typeEndsInDef . defType =<< getConstInfo name
   reportTarget target
   terSetTarget target $ do
 
@@ -487,7 +488,7 @@ termType = return mempty
 
   -- create n variable patterns
   mkPats n  = zipWith mkPat (downFrom n) <$> getContextNames
-  mkPat i x = notMasked $ VarP PatOSystem $ DBPatVar (prettyShow x) i
+  mkPat i x = notMasked $ VarP defaultPatternInfo $ DBPatVar (prettyShow x) i
 
 -- | Mask arguments and result for termination checking
 --   according to type of function.
@@ -572,7 +573,7 @@ instance TermToPattern Term DeBruijnPattern where
     DontCare t  -> termToPattern t -- OR: __IMPOSSIBLE__  -- removed by stripAllProjections
     -- Leaves.
     Var i []    -> varP . (`DBPatVar` i) . prettyShow <$> nameOfBV i
-    Lit l       -> return $ LitP l
+    Lit l       -> return $ litP l
     Dummy s _   -> __IMPOSSIBLE_VERBOSE__ s
     t           -> return $ dotP t
 
@@ -677,6 +678,7 @@ instance ExtractCalls Sort where
       Type t     -> terUnguarded $ extract t  -- no guarded levels
       Prop t     -> terUnguarded $ extract t
       PiSort a s -> extract (a, s)
+      FunSort s1 s2 -> extract (s1, s2)
       UnivSort s -> extract s
       MetaS x es -> return empty
       DefS d es  -> return empty
@@ -1057,7 +1059,7 @@ compareProj d d'
           def <- theDef <$> getConstInfo r
           case def of
             Record{ recFields = fs } -> do
-              fs <- return $ map unArg fs
+              fs <- return $ map unDom fs
               case (List.find (d==) fs, List.find (d'==) fs) of
                 (Just i, Just i')
                   -- earlier field is smaller
@@ -1214,7 +1216,7 @@ compareTerm' v mp@(Masked m p) = do
 
     _ | m -> return Order.unknown
 
-    (Lit l, LitP l')
+    (Lit l, LitP _ l')
       | l == l'     -> return Order.le
       | otherwise   -> return Order.unknown
 
@@ -1254,7 +1256,7 @@ subTerm t p = if equal t p then Order.le else properSubTerm t p
           : (length ts == length ps)
           : zipWith (\ t p -> equal (unArg t) (namedArg p)) ts ps
     equal (Var i []) (VarP _ x) = i == dbPatVarIndex x
-    equal (Lit l)    (LitP l') = l == l'
+    equal (Lit l)    (LitP _ l') = l == l'
     -- Terms.
     -- Checking for identity here is very fragile.
     -- However, we cannot do much more, as we are not allowed to normalize t.

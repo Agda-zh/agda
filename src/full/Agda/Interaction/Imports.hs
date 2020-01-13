@@ -40,6 +40,7 @@ import Agda.Syntax.Translation.ConcreteToAbstract
 import Agda.TypeChecking.Errors
 import Agda.TypeChecking.Warnings
 import Agda.TypeChecking.Reduce
+import Agda.TypeChecking.Rewriting.Confluence ( checkConfluenceOfRules )
 import Agda.TypeChecking.MetaVars ( openMetasToPostulates )
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Serialise
@@ -64,6 +65,7 @@ import Agda.Interaction.Response
 import Agda.Utils.Except ( MonadError(catchError, throwError) )
 import Agda.Utils.FileName
 import Agda.Utils.Lens
+import Agda.Utils.List
 import Agda.Utils.Maybe
 import qualified Agda.Utils.Maybe.Strict as Strict
 import Agda.Utils.Monad
@@ -152,6 +154,9 @@ mergeInterface i = do
     reportSLn "import.iface.merge" 20 $
       "  Rebinding primitives " ++ show prim
     mapM_ rebind prim
+    whenM (optConfluenceCheck <$> pragmaOptions) $ do
+      reportSLn "import.iface.confluence" 20 $ "  Checking confluence of imported rewrite rules"
+      checkConfluenceOfRules $ concat $ HMap.elems $ sig ^. sigRewriteRules
     where
         rebind (x, q) = do
             PrimImpl _ pf <- lookupPrimitiveFunction x
@@ -1011,7 +1016,7 @@ createInterface file mname isMain msi =
     return $ first constructIScope (i, mallWarnings)
 
 getUniqueMetasRanges :: [MetaId] -> TCM [Range]
-getUniqueMetasRanges = fmap List.nub . mapM getMetaRange
+getUniqueMetasRanges = fmap (nubOn id) . mapM getMetaRange
 
 getUnsolvedMetas :: TCM [Range]
 getUnsolvedMetas = do

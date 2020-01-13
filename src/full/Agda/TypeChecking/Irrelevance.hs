@@ -116,7 +116,7 @@ workOnTypes cont = do
 --   as argument.
 workOnTypes' :: (MonadTCEnv m) => Bool -> m a -> m a
 workOnTypes' experimental
-  = modifyContext (map $ mapRelevance f)
+  = modifyContextInfo (mapRelevance f)
   . applyQuantityToContext zeroQuantity
   . typeLevelReductions
   . localTC (\ e -> e { envWorkingOnTypes = True })
@@ -325,6 +325,7 @@ instance UsableRelevance Sort where
     Inf    -> return True
     SizeUniv -> return True
     PiSort a s -> usableRel rel (a,s)
+    FunSort s1 s2 -> usableRel rel (s1,s2)
     UnivSort s -> usableRel rel s
     MetaS x es -> usableRel rel es
     DefS d es  -> usableRel rel $ Def d es
@@ -417,7 +418,7 @@ instance UsableModality Term where
         text ("has modality " ++ show mmod ++ ", which is a " ++
               (if ok then "" else "NOT ") ++ "more usable modality than " ++ show mod)
       return ok `and2M` usableMod mod vs
-    DontCare _ -> return $ isIrrelevant mod
+    DontCare v -> usableMod mod v
     Dummy{}  -> return True
 
 instance UsableRelevance a => UsableModality (Type' a) where

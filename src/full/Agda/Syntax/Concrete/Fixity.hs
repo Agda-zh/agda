@@ -204,16 +204,16 @@ declaresName x = declaresNames [x]
 --   i.e., do not go into modules.
 declaredNames :: Declaration -> DeclaredNames
 declaredNames d = case d of
-  TypeSig _ x _        -> declaresName x
-  FieldSig _ x _       -> declaresName x
+  TypeSig _ _ x _      -> declaresName x
+  FieldSig _ _ x _     -> declaresName x
   Field _ fs           -> foldMap declaredNames fs
-  FunClause (LHS p [] []) _ _ _
+  FunClause (LHS p [] [] _) _ _ _
     | IdentP (QName x) <- removeSingletonRawAppP p
                        -> declaresName x
   FunClause{}          -> mempty
-  DataSig _ _ x _ _    -> declaresName x
-  DataDef _ _ _ _ cs   -> foldMap declaredNames cs
-  Data _ _ x _ _ cs    -> declaresName x <> foldMap declaredNames cs
+  DataSig _ x _ _      -> declaresName x
+  DataDef _ _ _ cs     -> foldMap declaredNames cs
+  Data _ x _ _ cs      -> declaresName x <> foldMap declaredNames cs
   RecordSig _ x _ _    -> declaresName x
   RecordDef _ x _ _ c _ _ -> declaresNames $     foldMap (:[]) (fst <$> c)
   Record _ x _ _ c _ _ _  -> declaresNames $ x : foldMap (:[]) (fst <$> c)

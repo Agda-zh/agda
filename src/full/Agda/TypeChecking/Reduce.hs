@@ -24,9 +24,7 @@ import Agda.Syntax.Literal
 
 import {-# SOURCE #-} Agda.TypeChecking.Irrelevance (workOnTypes, isPropM)
 import {-# SOURCE #-} Agda.TypeChecking.Level (reallyUnLevelView)
-import Agda.TypeChecking.Monad hiding ( enterClosure, isInstantiatedMeta
-                                      , getConstInfo, lookupMeta
-                                      , getPrimitive, constructorForm )
+import Agda.TypeChecking.Monad hiding ( enterClosure, constructorForm )
 import qualified Agda.TypeChecking.Monad as TCM
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.CompiledClause
@@ -75,7 +73,7 @@ simplify = liftReduce . simplify'
 -- | Meaning no metas left in the instantiation.
 isFullyInstantiatedMeta :: MetaId -> TCM Bool
 isFullyInstantiatedMeta m = do
-  mv <- TCM.lookupMeta m
+  mv <- lookupMeta m
   case mvInstantiation mv of
     InstV _tel v -> noMetas <$> instantiateFull v
     _ -> return False
@@ -205,7 +203,6 @@ instance Instantiate Constraint where
   instantiate' (ElimCmp cmp fs t v as bs) =
     ElimCmp cmp fs <$> instantiate' t <*> instantiate' v <*> instantiate' as <*> instantiate' bs
   instantiate' (LevelCmp cmp u v)   = uncurry (LevelCmp cmp) <$> instantiate' (u,v)
-  instantiate' (TypeCmp cmp a b)    = uncurry (TypeCmp cmp) <$> instantiate' (a,b)
   instantiate' (TelCmp a b cmp tela telb) = uncurry (TelCmp a b cmp)  <$> instantiate' (tela,telb)
   instantiate' (SortCmp cmp a b)    = uncurry (SortCmp cmp) <$> instantiate' (a,b)
   instantiate' (Guarded c pid)      = Guarded <$> instantiate' c <*> pure pid
@@ -221,6 +218,7 @@ instance Instantiate Constraint where
 
 instance Instantiate CompareAs where
   instantiate' (AsTermsOf a) = AsTermsOf <$> instantiate' a
+  instantiate' AsSizes       = return AsSizes
   instantiate' AsTypes       = return AsTypes
 
 instance Instantiate e => Instantiate (Map k e) where
@@ -263,6 +261,7 @@ instance IsMeta Sort where
 
 instance IsMeta CompareAs where
   isMeta (AsTermsOf a) = isMeta a
+  isMeta AsSizes       = return Nothing
   isMeta AsTypes       = return Nothing
 
 -- | Case on whether a term is blocked on a meta (or is a meta).
@@ -298,9 +297,13 @@ instance Reduce Sort where
     reduce' s = do
       s <- instantiate' s
       case s of
-        PiSort a s -> do
-          (a,s) <- reduce' (a,s)
-          maybe (return $ PiSort a s) reduce' $ piSort' a s
+        PiSort a s2 -> do
+          (s1' , s2') <- reduce' (getSort a , s2)
+          let a' = set lensSort s1' a
+          maybe (return $ PiSort a' s2') reduce' $ piSort' a' s2'
+        FunSort s1 s2 -> do
+          (s1' , s2') <- reduce (s1 , s2)
+          maybe (return $ FunSort s1' s2') reduce' $ funSort' s1' s2'
         UnivSort s' -> do
           s' <- reduce' s'
           ui <- univInf
@@ -392,7 +395,7 @@ blockedOrMeta r =
     NotBlocked i _           -> NotBlocked i ()
 
 reduceIApply' :: (Term -> ReduceM (Blocked Term)) -> ReduceM (Blocked Term) -> [Elim] -> ReduceM (Blocked Term)
-reduceIApply' reduceB' d (IApply x y r : es) = do
+reduceIApply' red d (IApply x y r : es) = do
   view <- intervalView'
   r <- reduceB' r
   -- We need to propagate the blocking information so that e.g.
@@ -400,11 +403,15 @@ reduceIApply' reduceB' d (IApply x y r : es) = do
   let blockedInfo = blockedOrMeta r
 
   case view (ignoreBlocking r) of
-   IZero -> reduceB' (applyE x es)
-   IOne  -> reduceB' (applyE y es)
-   _     -> fmap (<* blockedInfo) (reduceIApply d es)
-reduceIApply' reduceB' d (_ : es) = reduceIApply d es
-reduceIApply' reduceB' d [] = d
+   IZero -> red (applyE x es)
+   IOne  -> red (applyE y es)
+   _     -> fmap (<* blockedInfo) (reduceIApply' red d es)
+reduceIApply' red d (_ : es) = reduceIApply' red d es
+reduceIApply' _   d [] = d
+
+instance Reduce DeBruijnPattern where
+  reduceB' (DotP o v) = fmap (DotP o) <$> reduceB' v
+  reduceB' p          = return $ notBlocked p
 
 instance Reduce Term where
   reduceB' = {-# SCC "reduce'<Term>" #-} maybeFastReduceTerm
@@ -524,6 +531,7 @@ unfoldDefinition' unfoldDelayed keepGoing v0 f es = do
 unfoldDefinitionStep :: Bool -> Term -> QName -> Elims -> ReduceM (Reduced (Blocked Term) Term)
 unfoldDefinitionStep unfoldDelayed v0 f es =
   {-# SCC "reduceDef" #-} do
+  traceSDoc "tc.reduce" 90 ("unfoldDefinitionStep v0" <+> prettyTCM v0) $ do
   info <- getConstInfo f
   rewr <- instantiateRewriteRules =<< getRewriteRulesFor f
   allowed <- asksTC envAllowedReductions
@@ -533,7 +541,7 @@ unfoldDefinitionStep unfoldDelayed v0 f es =
       -- Non-terminating functions
       -- (i.e., those that failed the termination check)
       -- and delayed definitions
-      -- are not unfolded unless explicitely permitted.
+      -- are not unfolded unless explicitly permitted.
       dontUnfold =
         (defNonterminating info && notElem NonTerminatingReductions allowed)
         || (defTerminationUnconfirmed info && notElem UnconfirmedReductions allowed)
@@ -588,9 +596,14 @@ unfoldDefinitionStep unfoldDelayed v0 f es =
 
     reduceNormalE :: Term -> QName -> [MaybeReduced Elim] -> Bool -> [Clause] -> Maybe CompiledClauses -> RewriteRules -> ReduceM (Reduced (Blocked Term) Term)
     reduceNormalE v0 f es dontUnfold def mcc rewr = {-# SCC "reduceNormal" #-} do
+      traceSDoc "tc.reduce" 90 ("reduceNormalE v0 =" <+> prettyTCM v0) $ do
       case (def,rewr) of
-        _ | dontUnfold -> defaultResult -- non-terminating or delayed
-        ([],[])        -> defaultResult -- no definition for head
+        _ | dontUnfold -> traceSLn "tc.reduce" 90 "reduceNormalE: don't unfold (non-terminating or delayed)" $
+                          defaultResult -- non-terminating or delayed
+        ([],[])        -> traceSLn "tc.reduce" 90 "reduceNormalE: no clauses or rewrite rules" $ do
+          -- no definition for head
+          blk <- defBlocked <$> getConstInfo f
+          noReduction $ blk $> vfull
         (cls,rewr)     -> do
           ev <- appDefE_ f v0 cls mcc rewr es
           debugReduce ev
@@ -706,6 +719,7 @@ appDef v cc rewr args = appDefE v cc rewr $ map (fmap Apply) args
 
 appDefE :: Term -> CompiledClauses -> RewriteRules -> MaybeReducedElims -> ReduceM (Reduced (Blocked Term) Term)
 appDefE v cc rewr es = do
+  traceSDoc "tc.reduce" 90 ("appDefE v = " <+> prettyTCM v) $ do
   r <- matchCompiledE cc es
   case r of
     YesReduction simpl t -> return $ YesReduction simpl t
@@ -716,7 +730,8 @@ appDef' :: Term -> [Clause] -> RewriteRules -> MaybeReducedArgs -> ReduceM (Redu
 appDef' v cls rewr args = appDefE' v cls rewr $ map (fmap Apply) args
 
 appDefE' :: Term -> [Clause] -> RewriteRules -> MaybeReducedElims -> ReduceM (Reduced (Blocked Term) Term)
-appDefE' v cls rewr es = goCls cls $ map ignoreReduced es
+appDefE' v cls rewr es = traceSDoc "tc.reduce" 90 ("appDefE' v = " <+> prettyTCM v) $ do
+  goCls cls $ map ignoreReduced es
   where
     goCls :: [Clause] -> [Elim] -> ReduceM (Reduced (Blocked Term) Term)
     goCls cl es = do
@@ -769,7 +784,6 @@ instance Reduce Constraint where
   reduce' (ElimCmp cmp fs t v as bs) =
     ElimCmp cmp fs <$> reduce' t <*> reduce' v <*> reduce' as <*> reduce' bs
   reduce' (LevelCmp cmp u v)    = uncurry (LevelCmp cmp) <$> reduce' (u,v)
-  reduce' (TypeCmp cmp a b)     = uncurry (TypeCmp cmp) <$> reduce' (a,b)
   reduce' (TelCmp a b cmp tela telb) = uncurry (TelCmp a b cmp)  <$> reduce' (tela,telb)
   reduce' (SortCmp cmp a b)     = uncurry (SortCmp cmp) <$> reduce' (a,b)
   reduce' (Guarded c pid)       = Guarded <$> reduce' c <*> pure pid
@@ -785,6 +799,7 @@ instance Reduce Constraint where
 
 instance Reduce CompareAs where
   reduce' (AsTermsOf a) = AsTermsOf <$> reduce' a
+  reduce' AsSizes       = return AsSizes
   reduce' AsTypes       = return AsTypes
 
 instance Reduce e => Reduce (Map k e) where
@@ -803,6 +818,10 @@ instance Reduce EqualityView where
     <*> reduce' t
     <*> reduce' a
     <*> reduce' b
+
+instance Reduce t => Reduce (IPBoundary' t) where
+  reduce' = traverse reduce'
+  reduceB' = fmap sequenceA . traverse reduceB'
 
 ---------------------------------------------------------------------------
 -- * Simplification
@@ -853,6 +872,7 @@ instance Simplify Sort where
     simplify' s = do
       case s of
         PiSort a s -> piSort <$> simplify' a <*> simplify' s
+        FunSort s1 s2 -> funSort <$> simplify' s1 <*> simplify' s2
         UnivSort s -> do
           ui <- univInf
           univSort ui <$> simplify' s
@@ -931,7 +951,6 @@ instance Simplify Constraint where
   simplify' (ElimCmp cmp fs t v as bs) =
     ElimCmp cmp fs <$> simplify' t <*> simplify' v <*> simplify' as <*> simplify' bs
   simplify' (LevelCmp cmp u v)    = uncurry (LevelCmp cmp) <$> simplify' (u,v)
-  simplify' (TypeCmp cmp a b)     = uncurry (TypeCmp cmp) <$> simplify' (a,b)
   simplify' (TelCmp a b cmp tela telb) = uncurry (TelCmp a b cmp) <$> simplify' (tela,telb)
   simplify' (SortCmp cmp a b)     = uncurry (SortCmp cmp) <$> simplify' (a,b)
   simplify' (Guarded c pid)       = Guarded <$> simplify' c <*> pure pid
@@ -947,6 +966,7 @@ instance Simplify Constraint where
 
 instance Simplify CompareAs where
   simplify' (AsTermsOf a) = AsTermsOf <$> simplify' a
+  simplify' AsSizes       = return AsSizes
   simplify' AsTypes       = return AsTypes
 
 instance Simplify Bool where
@@ -982,6 +1002,9 @@ instance Simplify EqualityView where
     <*> simplify' a
     <*> simplify' b
 
+instance Simplify t => Simplify (IPBoundary' t) where
+  simplify' = traverse simplify'
+
 ---------------------------------------------------------------------------
 -- * Normalisation
 ---------------------------------------------------------------------------
@@ -997,6 +1020,7 @@ instance Normalise Sort where
       s <- reduce' s
       case s of
         PiSort a s -> piSort <$> normalise' a <*> normalise' s
+        FunSort s1 s2 -> funSort <$> normalise' s1 <*> normalise' s2
         UnivSort s -> do
           ui <- univInf
           univSort ui <$> normalise' s
@@ -1095,7 +1119,6 @@ instance Normalise Constraint where
   normalise' (ElimCmp cmp fs t v as bs) =
     ElimCmp cmp fs <$> normalise' t <*> normalise' v <*> normalise' as <*> normalise' bs
   normalise' (LevelCmp cmp u v)    = uncurry (LevelCmp cmp) <$> normalise' (u,v)
-  normalise' (TypeCmp cmp a b)     = uncurry (TypeCmp cmp) <$> normalise' (a,b)
   normalise' (TelCmp a b cmp tela telb) = uncurry (TelCmp a b cmp) <$> normalise' (tela,telb)
   normalise' (SortCmp cmp a b)     = uncurry (SortCmp cmp) <$> normalise' (a,b)
   normalise' (Guarded c pid)       = Guarded <$> normalise' c <*> pure pid
@@ -1111,6 +1134,7 @@ instance Normalise Constraint where
 
 instance Normalise CompareAs where
   normalise' (AsTermsOf a) = AsTermsOf <$> normalise' a
+  normalise' AsSizes       = return AsSizes
   normalise' AsTypes       = return AsTypes
 
 instance Normalise Bool where
@@ -1131,7 +1155,7 @@ instance Normalise DBPatVar where
 instance Normalise a => Normalise (Pattern' a) where
   normalise' p = case p of
     VarP o x     -> VarP o <$> normalise' x
-    LitP _       -> return p
+    LitP{}       -> return p
     ConP c mt ps -> ConP c <$> normalise' mt <*> normalise' ps
     DefP o q ps  -> DefP o q <$> normalise' ps
     DotP o v     -> DotP o <$> normalise' v
@@ -1159,6 +1183,9 @@ instance Normalise EqualityView where
     <*> normalise' a
     <*> normalise' b
 
+instance Normalise t => Normalise (IPBoundary' t) where
+  normalise' = traverse normalise'
+
 ---------------------------------------------------------------------------
 -- * Full instantiation
 ---------------------------------------------------------------------------
@@ -1178,6 +1205,7 @@ instance InstantiateFull Sort where
             Type n     -> Type <$> instantiateFull' n
             Prop n     -> Prop <$> instantiateFull' n
             PiSort a s -> piSort <$> instantiateFull' a <*> instantiateFull' s
+            FunSort s1 s2 -> funSort <$> instantiateFull' s1 <*> instantiateFull' s2
             UnivSort s -> do
               ui <- univInf
               univSort ui <$> instantiateFull' s
@@ -1308,7 +1336,6 @@ instance InstantiateFull Constraint where
     ElimCmp cmp fs t v as bs ->
       ElimCmp cmp fs <$> instantiateFull' t <*> instantiateFull' v <*> instantiateFull' as <*> instantiateFull' bs
     LevelCmp cmp u v    -> uncurry (LevelCmp cmp) <$> instantiateFull' (u,v)
-    TypeCmp cmp a b     -> uncurry (TypeCmp cmp) <$> instantiateFull' (a,b)
     TelCmp a b cmp tela telb -> uncurry (TelCmp a b cmp) <$> instantiateFull' (tela,telb)
     SortCmp cmp a b     -> uncurry (SortCmp cmp) <$> instantiateFull' (a,b)
     Guarded c pid       -> Guarded <$> instantiateFull' c <*> pure pid
@@ -1324,6 +1351,7 @@ instance InstantiateFull Constraint where
 
 instance InstantiateFull CompareAs where
   instantiateFull' (AsTermsOf a) = AsTermsOf <$> instantiateFull' a
+  instantiateFull' AsSizes       = return AsSizes
   instantiateFull' AsTypes       = return AsTypes
 
 instance (InstantiateFull a) => InstantiateFull (Elim' a) where
@@ -1457,13 +1485,14 @@ instance InstantiateFull CompiledClauses where
   instantiateFull' (Case n bs) = Case n <$> instantiateFull' bs
 
 instance InstantiateFull Clause where
-    instantiateFull' (Clause rl rf tel ps b t catchall unreachable) =
+    instantiateFull' (Clause rl rf tel ps b t catchall unreachable ell) =
        Clause rl rf <$> instantiateFull' tel
        <*> instantiateFull' ps
        <*> instantiateFull' b
        <*> instantiateFull' t
        <*> return catchall
        <*> return unreachable
+       <*> return ell
 
 instance InstantiateFull Interface where
     instantiateFull' (Interface h s ft ms mod scope inside

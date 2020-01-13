@@ -11,6 +11,8 @@ module Agda.TypeChecking.Rules.Builtin
 
 import Control.Monad
 import Data.List (find, sortBy)
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Function (on)
 
 import qualified Agda.Syntax.Abstract as A
@@ -46,7 +48,6 @@ import Agda.Utils.Functor
 import Agda.Utils.List
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
-import Agda.Utils.NonemptyList
 import Agda.Utils.Null
 import Agda.Utils.Size
 
@@ -360,8 +361,6 @@ coreBuiltins =
   , builtinAgdaTCMWithNormalisation          |-> builtinPostulate (hPi "a" tlevel $ hPi "A" (tsetL 0) $ tbool --> tTCM 1 (varM 0) --> tTCM 1 (varM 0))
   , builtinAgdaTCMDebugPrint                 |-> builtinPostulate (tstring --> tnat --> tlist terrorpart --> tTCM_ primUnit)
   , builtinAgdaTCMNoConstraints              |-> builtinPostulate (hPi "a" tlevel $ hPi "A" (tsetL 0) $ tTCM 1 (varM 0) --> tTCM 1 (varM 0))
-  , builtinAgdaTCMSolveConstraints           |-> builtinPostulate (tTCM_ primUnit)
-  , builtinAgdaTCMSolveConstraintsMentioning |-> builtinPostulate (tlist tmeta --> tTCM_ primUnit)
   , builtinAgdaTCMRunSpeculative          |-> builtinPostulate (hPi "a" tlevel $ hPi "A" (tsetL 0) $
                                                                 tTCM 1 (primSigma <#> varM 1 <#> primLevelZero <@> varM 0 <@>
                                                                           (Lam defaultArgInfo . Abs "_" <$> primBool)) -->
@@ -554,7 +553,7 @@ inductiveCheck b n t = do
       def <- getConstInfo q
       let yes = return (q, def)
       case theDef def of
-        Datatype { dataInduction = Inductive, dataCons = cs }
+        Datatype { dataCons = cs }
           | length cs == n -> yes
           | otherwise      -> no
         Record { recInduction = ind } | n == 1 && ind /= Just CoInductive -> yes
@@ -823,7 +822,7 @@ bindBuiltin b x = do
     -- Get the non-empty list of AbstractName for x
     xs <- case x of
       VarName{}            -> failure
-      DefinedName _ x      -> return $ x :! []
+      DefinedName _ x      -> return $ x :| []
       FieldName xs         -> return xs
       ConstructorName xs   -> return xs
       PatternSynResName xs -> failure
@@ -854,7 +853,7 @@ isUntypedBuiltin b = elem b [builtinFromNat, builtinFromNeg, builtinFromString]
 bindUntypedBuiltin :: String -> ResolvedName -> TCM ()
 bindUntypedBuiltin b = \case
   DefinedName _ x -> bindBuiltinName b (Def (anameName x) [])
-  FieldName (x :! []) -> bindBuiltinName b (Def (anameName x) [])
+  FieldName (x :| []) -> bindBuiltinName b (Def (anameName x) [])
   _ -> genericError $ "The argument to BUILTIN " ++ b ++ " must be a defined unambiguous name"
 
 -- | Bind a builtin thing to a new name.
@@ -931,7 +930,6 @@ bindBuiltinNoDef b q = inTopContext $ do
         def = Datatype
               { dataPars       = 0
               , dataIxs        = 0
-              , dataInduction  = Inductive
               , dataClause     = Nothing
               , dataCons       = []     -- Constructors are added later
               , dataSort       = Inf

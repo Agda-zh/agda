@@ -4,6 +4,8 @@
 
 module Agda.Syntax.Internal.Names where
 
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -17,7 +19,6 @@ import qualified Agda.Syntax.Abstract as A
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.CompiledClause
 
-import Agda.Utils.NonemptyList
 
 import Agda.Utils.Impossible
 
@@ -29,7 +30,7 @@ class NamesIn a where
 
 instance NamesIn a => NamesIn (Maybe a)              where
 instance NamesIn a => NamesIn [a]                    where
-instance NamesIn a => NamesIn (NonemptyList a)       where
+instance NamesIn a => NamesIn (NonEmpty a)           where
 instance NamesIn a => NamesIn (Arg a)                where
 instance NamesIn a => NamesIn (Dom a)                where
 instance NamesIn a => NamesIn (Named n a)            where
@@ -93,7 +94,7 @@ instance NamesIn a => NamesIn (Case a) where
 instance NamesIn (Pattern' a) where
   namesIn p = case p of
     VarP{}        -> Set.empty
-    LitP l        -> namesIn l
+    LitP _ l      -> namesIn l
     DotP _ v      -> namesIn v
     ConP c _ args -> namesIn (c, args)
     DefP o q args -> namesIn (q, args)
@@ -110,6 +111,7 @@ instance NamesIn Sort where
     Inf      -> Set.empty
     SizeUniv -> Set.empty
     PiSort a b -> namesIn (a, b)
+    FunSort a b -> namesIn (a, b)
     UnivSort a -> namesIn a
     MetaS _ es -> namesIn es
     DefS d es  -> namesIn (d, es)

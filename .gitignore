@@ -11,6 +11,7 @@
 *.agdai
 *.hi
 *.o
+*.project.local
 *.tmp
 *.tmp.*
 *~

@@ -21,8 +21,16 @@
 
 .. This is the manual for the Agda programming language, its type checking,
 .. compilation and editing system and related resources/tools.
+.. The latest PDF version of this manual can be downloaded from `GitHub Actions
+.. <https://github.com/agda/agda/actions?query=workflow%3A%22User+Manual%22+is%3Asuccess>`_
+.. page (instruction on `how to find them
+.. <https://github.com/actions/upload-artifact#where-does-the-upload-go>_`).
 
 本手册涵盖了 Agda 编程语言、类型检查、代码补全、编辑系统及相关资源和工具的内容。
+本手册最新的 PDF 版本可从 `GitHub Actions
+<https://github.com/agda/agda/actions?query=workflow%3A%22User+Manual%22+is%3Asuccess>`_
+页面下载（参见 `如何找到它们
+<https://github.com/actions/upload-artifact#where-does-the-upload-go>`_ 的指南）。
 
 .. You can find a lot of useful resources on `Agda Wiki
 .. <https://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.HomePage>`_
