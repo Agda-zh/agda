@@ -32,7 +32,7 @@ jobs:
         curl -Lo /tmp/texlive.tar.gz https://github.com/jimhester/ubuntu-bin/releases/download/latest/texlive.tar.gz
         tar xzf /tmp/texlive.tar.gz -C ~
         tlmgr update --self
-        tlmgr install latex anyfontsize bbm capt-of cmap dvipng fncychap keystroke latexmk needspace
+        tlmgr install latex anyfontsize bbm capt-of cmap dvipng fncychap keystroke latexmk needspace cjk
     - name: Build User Manual in HTML
       run: |
         export PATH=$HOME/texlive/bin/x86_64-linux:$PATH
